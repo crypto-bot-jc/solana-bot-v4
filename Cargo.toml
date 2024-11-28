@@ -42,7 +42,6 @@ members = [
     "gossip",
     "install",
     "keygen",
-    "ledger",
     "ledger-tool",
     "local-cluster",
     "log-analyzer",
@@ -120,7 +119,10 @@ members = [
     "zk-token-sdk",
 ]
 
-exclude = ["programs/sbf"]
+exclude = [
+    "programs/sbf",
+    "ledger"
+]
 
 # This prevents a Travis CI error when building for Windows.
 resolver = "2"
