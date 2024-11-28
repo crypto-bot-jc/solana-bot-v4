@@ -1,0 +1,20 @@
+[package]
+name = "jito-protos"
+version = "0.2.1"
+description = "Protobufs for working with Jito block-engine"
+authors = ["Jito Team <team@jito.wtf>"]
+homepage = "https://jito.wtf/"
+edition = "2021"
+publish = false
+
+
+[dependencies]
+prost = "0.12"
+prost-types = "0.12"
+solana-ledger = "2.0.17"
+tonic = { version = "0.10", features = ["tls", "tls-roots", "tls-webpki-roots"] }
+protobuf-src = "1"
+
+[build-dependencies]
+tonic-build = "0.10"
+protobuf-src = "1"

@@ -26,7 +26,6 @@ serde_json = { workspace = true }
 signal-hook = { workspace = true }
 solana-client = { workspace = true }
 solana-entry = "2.1.2"
-solana-ledger = "2.1.2"
 solana-metrics = { workspace = true }
 solana-net-utils = { workspace = true }
 solana-perf = { workspace = true }
