@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 prost = "0.12"
 prost-types = "0.12"
-solana-ledger = { path = "../ledger" }
+solana-ledger = { workspace = true }
 tonic = { version = "0.10", features = ["tls", "tls-roots", "tls-webpki-roots"] }
 protobuf-src = "1"
 
