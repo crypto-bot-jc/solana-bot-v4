@@ -114,11 +114,12 @@ pub fn start_forwarder_threads(
 
 
             let mut shreds_received = Shredsreceived::new();
+            let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
+            println!("Thread ID: {}", thread_id);
             let send_thread = Builder::new()
                 .name(format!("ssPxyTx_{thread_id}"))
                 .spawn(move || {
-                    let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
-
+                    
                     while !exit.load(Ordering::Relaxed) {
                         crossbeam_channel::select! {
                             // forward packets
@@ -155,7 +156,6 @@ fn recv_from_channel_and_send_multiple_dest(
     metrics: &ShredMetrics,
 ) -> Result<(), ShredstreamProxyError> {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError)?;
-    println!("{:?}", packet_batch);
     println!("PacketBatch contains {} packets", packet_batch.len());
 
       for (i, packet) in packet_batch.iter().enumerate() {
