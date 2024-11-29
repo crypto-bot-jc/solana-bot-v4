@@ -3859,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "solana-ledger"
-version = "0.0.0"
+version = "1.18.26"
 dependencies = [
  "assert_matches",
  "bincode",

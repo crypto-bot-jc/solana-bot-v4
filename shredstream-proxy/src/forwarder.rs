@@ -164,8 +164,7 @@ pub fn start_forwarder_threads(
                                                     println!("Shred Type: Data");
 
 
-                                                   
-
+                                                
                                                     match result.clone() {
                                                         Ok(shred) => {
 
