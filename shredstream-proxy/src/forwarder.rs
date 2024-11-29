@@ -1,12 +1,8 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
-    panic,
-    sync::{
+    collections::HashMap, net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket}, panic, sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock,
-    },
-    thread::{sleep, spawn, Builder, JoinHandle},
-    time::{Duration, SystemTime},
+    }, thread::{sleep, spawn, Builder, JoinHandle}, time::{Duration, SystemTime}
 };
 
 use arc_swap::ArcSwap;
@@ -22,7 +18,11 @@ use solana_entry::entry::Entry;
 use bincode::{deserialize, Error};
 
 use itertools::Itertools;
+
+use crate::analyser::{self, recv_from_channel_and_analyse_shred}; 
 use jito_protos::trace_shred::TraceShred;
+
+
 use log::{debug, error, info, warn};
 use solana_sdk::transaction::VersionedTransaction;
 use prost::Message;
@@ -64,14 +64,9 @@ impl Shredsreceived {
 /// Bind to ports and start forwarding shreds
 #[allow(clippy::too_many_arguments)]
 pub fn start_forwarder_threads(
-    unioned_dest_sockets: Arc<ArcSwap<Vec<SocketAddr>>>, /* sockets shared between endpoint discovery thread and forwarders */
     src_addr: IpAddr,
     src_port: u16,
     num_threads: Option<usize>,
-    deduper: Arc<RwLock<Deduper<2, [u8]>>>,
-    metrics: Arc<ShredMetrics>,
-    use_discovery_service: bool,
-    debug_trace_shred: bool,
     shutdown_receiver: Receiver<()>,
     exit: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>> {
@@ -92,15 +87,14 @@ pub fn start_forwarder_threads(
             let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
             let stats = Arc::new(StreamerReceiveStats::new("shredstream_proxy-listen_thread"));
             let listen_thread = streamer::receiver(
-                format!("ssListen{thread_id}"),
                 Arc::new(incoming_shred_socket),
                 exit.clone(),
                 packet_sender,
                 recycler.clone(),
                 stats.clone(),
-                Duration::default(), // do not coalesce since batching consumes more cpu cycles and adds latency.
+                Duration::default(),
                 false,
-                None,
+                Some(Arc::new(AtomicBool::new(false))),
                 false,
             );
 
@@ -114,9 +108,6 @@ pub fn start_forwarder_threads(
                 })
             };
 
-            let deduper = deduper.clone();
-            let unioned_dest_sockets = unioned_dest_sockets.clone();
-            let metrics = metrics.clone();
             let shutdown_receiver = shutdown_receiver.clone();
             let exit = exit.clone();
 
@@ -126,93 +117,16 @@ pub fn start_forwarder_threads(
             let send_thread = Builder::new()
                 .name(format!("ssPxyTx_{thread_id}"))
                 .spawn(move || {
-                    let send_socket =
-                        UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
-                            .expect("to bind to udp port for forwarding");
-                    let mut local_dest_sockets = unioned_dest_sockets.load();
+                    let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
 
-                    let refresh_subscribers_tick = if use_discovery_service {
-                        crossbeam_channel::tick(Duration::from_secs(30))
-                    } else {
-                        crossbeam_channel::tick(Duration::MAX)
-                    };
                     while !exit.load(Ordering::Relaxed) {
                         crossbeam_channel::select! {
                             // forward packets
                             recv(packet_receiver) -> maybe_packet_batch => {
-                                println!("{:?}", maybe_packet_batch);
-                                let packet_batch: Result<PacketBatch, ShredstreamProxyError> = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError);
-                                println!("{:?}", packet_batch);
-                                //println!("PacketBatch contains {} packets", packet_batch.unwrap().len());
-                            
-                                for (i, packet) in packet_batch.unwrap().iter().enumerate() {
-
-                                    let packet: &Packet = packet;
-
-                                    println!("\nDecoding packet {}:", i);
-                                    println!("  Meta: {:?}", packet.meta());
-                                    println!("  Size: {}", packet.meta().size);
-                                    println!("  Size: {:?}", packet.meta().flags);
-                                    println!("PACKET : {:?}", packet);
-                                    
-                                    let result: Result<solana_ledger::shred::Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
-                                    match result {
-                                        Ok(_) => {
-
-                                            match result.unwrap().shred_type() {
-                                                solana_ledger::shred::ShredType::Data => {
-                                                    println!("Shred Type: Data");
-
-
-                                                
-                                                    match result.clone() {
-                                                        Ok(shred) => {
-
-                                                            println!("Shred: {:?}", shred.clone());
-                                                                                                                },
-                                                        Err(_) => {
-                                                            println!("Error");
-                                                        }
-                                                    }
-
-                                                }
-                                                solana_ledger::shred::ShredType::Code => {
-                                                    println!("Shred Type: Code");
-                                                }
-                                            }
-                                        
-
-                                            //let something: Result<Vec<Shred>, solana_ledger::shred::Error> = solana_ledger::shred::Shredder::try_recovery(shreds_received.shreds.clone(), &ReedSolomonCache::default());
-
-
-                                            
-                                        },
-                                        Err(_) => {
-
-                                            println!("Packet Error");
-                                        },
-                                    }
-
-                                    
-                                }
-
-                                
-
-
-                            //    let res = recv_from_channel_and_send_multiple_dest(
-                            //        maybe_packet_batch,
-                            //        &deduper,
-                            //        &send_socket,
-                            //        &local_dest_sockets,
-                            //        debug_trace_shred,
-                            //        &metrics,
-                            //    );
-
-        
-                            }
-                            // refresh thread-local subscribers
-                            recv(refresh_subscribers_tick) -> _ => {
-                                local_dest_sockets = unioned_dest_sockets.load();
+                               let res = recv_from_channel_and_analyse_shred(
+                                    maybe_packet_batch,
+                                    &mut shred_map
+                               );
                             }
                             // handle shutdown (avoid using sleep since it will hang under SIGINT)
                             recv(shutdown_receiver) -> _ => {

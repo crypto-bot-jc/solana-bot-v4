@@ -55,7 +55,7 @@ enum ProxySubcommands {
 struct ShredstreamArgs {
     /// Address for Jito Block Engine.
     /// See https://jito-labs.gitbook.io/mev/searcher-resources/block-engine#connection-details
-    #[arg(long, env)]
+    #[arg(long, env, default_value = "https://ny.mainnet.block-engine.jito.wtf")]
     block_engine_url: String,
 
     /// Manual override for auth service address. For internal use.
@@ -63,12 +63,12 @@ struct ShredstreamArgs {
     auth_url: Option<String>,
 
     /// Path to keypair file used to authenticate with the backend.
-    #[arg(long, env)]
+    #[arg(long, env, default_value = "shred.key.json")]
     auth_keypair: PathBuf,
 
     /// Desired regions to receive heartbeats from.
     /// Receives `n` different streams. Requires at least 1 region, comma separated.
-    #[arg(long, env, value_delimiter = ',', required(true))]
+    #[arg(long, env, default_value = "ny", value_delimiter = ',')]
     desired_regions: Vec<String>,
 
     #[clap(flatten)]
@@ -84,23 +84,6 @@ struct CommonArgs {
     /// Port where Shredstream proxy listens. Use `0` for random ephemeral port.
     #[arg(long, env, default_value_t = 20_000)]
     src_bind_port: u16,
-
-    /// Static set of IP:Port where Shredstream proxy forwards shreds to, comma separated.
-    /// Eg. `127.0.0.1:8001,10.0.0.1:8001`.
-    // Note: store the original string, so we can do hostname resolution when refreshing destinations
-    #[arg(long, env, value_delimiter = ',', value_parser = resolve_hostname_port)]
-    dest_ip_ports: Vec<(SocketAddr, String)>,
-
-    /// Http JSON endpoint to dynamically get IPs for Shredstream proxy to forward shreds.
-    /// Endpoints are then set-union with `dest-ip-ports`.
-    #[arg(long, env)]
-    endpoint_discovery_url: Option<String>,
-
-    /// Port to send shreds to for hosts fetched via `endpoint-discovery-url`.
-    /// Port can be found using `scripts/get_tvu_port.sh`.
-    /// See https://jito-labs.gitbook.io/mev/searcher-services/shredstream#running-shredstream
-    #[arg(long, env)]
-    discovered_endpoints_port: Option<u16>,
 
     /// Interval between logging stats to stdout and influx
     #[arg(long, env, default_value_t = 15_000)]
@@ -199,17 +182,6 @@ fn main() -> Result<(), ShredstreamProxyError> {
         ProxySubcommands::ForwardOnly(x) => x,
     };
     set_host_id(hostname::get()?.into_string().unwrap());
-    if (args.endpoint_discovery_url.is_none() && args.discovered_endpoints_port.is_some())
-        || (args.endpoint_discovery_url.is_some() && args.discovered_endpoints_port.is_none())
-    {
-        panic!("Invalid arguments provided, dynamic endpoints requires both --endpoint-discovery-url and --discovered-endpoints-port.")
-    }
-    if args.endpoint_discovery_url.is_none()
-        && args.discovered_endpoints_port.is_none()
-        && args.dest_ip_ports.is_empty()
-    {
-        panic!("No destinations found. You must provide values for --dest-ip-ports or --endpoint-discovery-url.")
-    }
 
     let exit = Arc::new(AtomicBool::new(false));
     let (shutdown_sender, shutdown_receiver) =
@@ -241,14 +213,6 @@ fn main() -> Result<(), ShredstreamProxyError> {
         thread_handles.push(heartbeat_hdl);
     }
 
-    // share sockets between refresh and forwarder thread
-    let unioned_dest_sockets = Arc::new(ArcSwap::from_pointee(
-        args.dest_ip_ports
-            .iter()
-            .map(|x| x.0)
-            .collect::<Vec<SocketAddr>>(),
-    ));
-
     // share deduper + metrics between forwarder <-> accessory thread
     // use mutex since metrics are write heavy. cheaper than rwlock
     let deduper = Arc::new(RwLock::new(Deduper::<2, [u8]>::new(
@@ -256,22 +220,15 @@ fn main() -> Result<(), ShredstreamProxyError> {
         forwarder::DEDUPER_NUM_BITS,
     )));
 
-    let metrics = Arc::new(ShredMetrics::new());
-    let use_discovery_service =
-        args.endpoint_discovery_url.is_some() && args.discovered_endpoints_port.is_some();
-    let forwarder_hdls = forwarder::start_forwarder_threads(
-        unioned_dest_sockets.clone(),
+        let forwarder_hdls = forwarder::start_forwarder_threads(
         args.src_bind_addr,
         args.src_bind_port,
         args.num_threads,
-        deduper.clone(),
-        metrics.clone(),
-        use_discovery_service,
-        args.debug_trace_shred,
         shutdown_receiver.clone(),
         exit.clone(),
     );
-    thread_handles.extend(forwarder_hdls);
+
+    let metrics = Arc::new(ShredMetrics::new());
 
     let metrics_hdl = forwarder::start_forwarder_accessory_thread(
         deduper,
@@ -282,17 +239,6 @@ fn main() -> Result<(), ShredstreamProxyError> {
         exit.clone(),
     );
     thread_handles.push(metrics_hdl);
-    if use_discovery_service {
-        let refresh_handle = forwarder::start_destination_refresh_thread(
-            args.endpoint_discovery_url.unwrap(),
-            args.discovered_endpoints_port.unwrap(),
-            args.dest_ip_ports,
-            unioned_dest_sockets,
-            shutdown_receiver,
-            exit,
-        );
-        thread_handles.push(refresh_handle);
-    }
 
     info!(
         "Shredstream started, listening on {}:{}/udp.",

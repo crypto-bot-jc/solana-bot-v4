@@ -5,7 +5,8 @@ target/
 /solana-metrics/
 /solana-metrics.tar.bz2
 /test-ledger/
-solana-2.0
+
+shred.key.json
 
 **/*.rs.bk
 .cargo
