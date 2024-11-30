@@ -43,16 +43,28 @@ pub fn recv_from_channel_and_analyse_shred(
 
 fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: &mut Vec<(u64, u32)>) { // -> Option<Vec<u8>> {
     // Only add non-duplicate shreds to the map
-    
-    shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new).push(shred.clone());
-    match shred_map.get(&(shred.slot(), shred.fec_set_index())) {
+    let existing_shred  = match shred_map.get(&(shred.slot(), shred.fec_set_index())) {
         Some(shreds) => {
-            shreds.iter().find(|s| s.index() == shred.index() && s.is_code() == shred.is_data()).unwrap();
+            let shred = shreds.iter().find(|s| s.index() == shred.index() && s.is_code() == shred.is_data());
+            if shred.is_some() {
+                println!("Duplicate shred found: {:?}", shred.unwrap().index());
+            }
+            shred
         },
         None => {
-            println!("Shred map length: None");
+            // Create a new entry in the map if not already present
+            shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new);
+            None
         }
-    } 
+    };
+
+    if existing_shred.is_some() {
+        return;
+    }
+
+    shred_map.entry((shred.slot(), shred.fec_set_index())).and_modify(|shreds| {
+        shreds.push(shred.clone());
+    });
 
     if let Some(mut shreds) = shred_map.get(&(shred.slot(), shred.fec_set_index())) {
         for _shred in shreds { //Iterate over all shreds in the slot, because we need to check if any of the shreds is complete and last in slot
@@ -139,6 +151,7 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                         let elapsed_time = start_time.elapsed();
                         println!("Time taken for failed recovery: {:?}", elapsed_time);
                         println!("Error during recovery: {:?}", error);
+                        println!("Failing shreds {:?}", shreds.iter().map(|s| (s.index(), s.is_data())).collect::<Vec<(u32, bool)>>());
                     }
                 }
             } else {
