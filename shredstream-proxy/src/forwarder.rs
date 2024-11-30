@@ -12,8 +12,6 @@ use solana_ledger::shred::Shred;
 use solana_ledger::shred::ShredData;
 use solana_ledger::shred::ReedSolomonCache;
 use solana_entry::entry::Entry;
-// use solana-ledger;
-// use bincode;
 
 use bincode::{deserialize, Error};
 
@@ -22,7 +20,6 @@ use itertools::Itertools;
 use crate::analyser::{self, recv_from_channel_and_analyse_shred}; 
 use jito_protos::trace_shred::TraceShred;
 
-
 use log::{debug, error, info, warn};
 use solana_sdk::transaction::VersionedTransaction;
 use prost::Message;
@@ -30,7 +27,6 @@ use solana_metrics::{datapoint_info, datapoint_warn};
 use solana_perf::{
     deduper::Deduper,
     packet::{PacketBatch, PacketBatchRecycler, Packet},
-
     recycler::Recycler,
 };
 use solana_streamer::{
@@ -41,7 +37,6 @@ use solana_streamer::{
 
 use crate::{resolve_hostname_port, ShredstreamProxyError};
 
-// values copied from https://github.com/solana-labs/solana/blob/33bde55bbdde13003acf45bb6afe6db4ab599ae4/core/src/sigverify_shreds.rs#L20
 pub const DEDUPER_FALSE_POSITIVE_RATE: f64 = 0.001;
 pub const DEDUPER_NUM_BITS: u64 = 637_534_199; // 76MB
 pub const DEDUPER_RESET_CYCLE: Duration = Duration::from_secs(5 * 60);
@@ -51,17 +46,14 @@ struct Shredsreceived {
 }
 
 impl Shredsreceived {
-    // Constructor to create a new instance
     fn new() -> Shredsreceived {
         Shredsreceived {
             shreds: Vec::new(),
         }
     }
-
 }
 
-
-/// Bind to ports and start forwarding shreds
+/// Bind to port and start forwarding shreds using a single connection
 #[allow(clippy::too_many_arguments)]
 pub fn start_forwarder_threads(
     src_addr: IpAddr,
@@ -70,78 +62,74 @@ pub fn start_forwarder_threads(
     shutdown_receiver: Receiver<()>,
     exit: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>> {
-    let num_threads = num_threads
-        .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).max(4));
-
     let recycler: PacketBatchRecycler = Recycler::warmed(100, 1024);
-    // spawn a thread for each listen socket. linux kernel will load balance amongst shared sockets
-    solana_net_utils::multi_bind_in_range(src_addr, (src_port, src_port + 1), num_threads)
+    
+    // Create a single socket connection
+    let incoming_shred_socket = UdpSocket::bind(SocketAddr::new(src_addr, src_port))
         .unwrap_or_else(|_| {
-            panic!("Failed to bind listener sockets. Check that port {src_port} is not in use.")
+            panic!("Failed to bind listener socket. Check that port {src_port} is not in use.")
+        });
+
+    let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
+    let stats = Arc::new(StreamerReceiveStats::new("shredstream_proxy-listen_thread"));
+    
+    // Create single listen thread
+    let listen_thread = streamer::receiver(
+        Arc::new(incoming_shred_socket),
+        exit.clone(),
+        packet_sender,
+        recycler.clone(),
+        stats.clone(),
+        Duration::default(),
+        false,
+        Some(Arc::new(AtomicBool::new(false))),
+        false,
+    );
+
+    let report_metrics_thread = {
+        let exit = exit.clone();
+        spawn(move || {
+            while !exit.load(Ordering::Relaxed) {
+                sleep(Duration::from_secs(1));
+                stats.report();
+            }
         })
-        .1
-        .into_iter()
-        .enumerate()
-        .flat_map(|(thread_id, incoming_shred_socket)| {
-            let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
-            let stats = Arc::new(StreamerReceiveStats::new("shredstream_proxy-listen_thread"));
-            let listen_thread = streamer::receiver(
-                Arc::new(incoming_shred_socket),
-                exit.clone(),
-                packet_sender,
-                recycler.clone(),
-                stats.clone(),
-                Duration::default(),
-                false,
-                Some(Arc::new(AtomicBool::new(false))),
-                false,
-            );
+    };
 
-            let report_metrics_thread = {
-                let exit = exit.clone();
-                spawn(move || {
-                    while !exit.load(Ordering::Relaxed) {
-                        sleep(Duration::from_secs(1));
-                        stats.report();
+    let shutdown_receiver = shutdown_receiver.clone();
+    let exit = exit.clone();
+
+    let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
+    let mut total_shred_received_count = 0;
+    let mut shreds_to_ignore: Vec<(u64, u32)> = Vec::new();
+    
+    // Create single processing thread
+    let process_thread = Builder::new()
+        .name("ssPxyTx_main".to_string())
+        .spawn(move || {
+            while !exit.load(Ordering::Relaxed) {
+                crossbeam_channel::select! {
+                    // forward packets
+                    recv(packet_receiver) -> maybe_packet_batch => {
+                        let res = recv_from_channel_and_analyse_shred(
+                            maybe_packet_batch,
+                            &mut shred_map,
+                            &mut shreds_to_ignore,
+                            &mut total_shred_received_count
+                        );
                     }
-                })
-            };
-
-            let shutdown_receiver = shutdown_receiver.clone();
-            let exit = exit.clone();
-
-            println!("Thread ID: {}", thread_id);
-            let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
-            let mut total_shred_received_count = 0;
-            let send_thread = Builder::new()
-                .name(format!("ssPxyTx_{thread_id}"))
-                .spawn(move || {
-                    
-                    while !exit.load(Ordering::Relaxed) {
-                        crossbeam_channel::select! {
-                            // forward packets
-                            recv(packet_receiver) -> maybe_packet_batch => {
-                               let res = recv_from_channel_and_analyse_shred(
-                                    maybe_packet_batch,
-                                    &mut shred_map,
-                                    &mut total_shred_received_count
-                               );
-                            }
-                            // handle shutdown (avoid using sleep since it will hang under SIGINT)
-                            recv(shutdown_receiver) -> _ => {
-                                break;
-                            }
-                        }
+                    // handle shutdown
+                    recv(shutdown_receiver) -> _ => {
+                        break;
                     }
-                    info!("Exiting forwarder thread {thread_id}.");
-                })
-                .unwrap();
-
-            [listen_thread, send_thread, report_metrics_thread]
+                }
+            }
+            info!("Exiting forwarder thread.");
         })
-        .collect::<Vec<JoinHandle<()>>>()
+        .unwrap();
+
+    vec![listen_thread, process_thread, report_metrics_thread]
 }
-
 
 /// Broadcasts same packet to multiple recipients
 /// Returns Err when unable to receive packets.
@@ -156,76 +144,17 @@ fn recv_from_channel_and_send_multiple_dest(
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError)?;
     println!("PacketBatch contains {} packets", packet_batch.len());
 
-      for (i, packet) in packet_batch.iter().enumerate() {
+    for (i, packet) in packet_batch.iter().enumerate() {
         println!("\nDecoding packet {}:", i);
         println!("  Meta: {:?}", packet.meta());
         println!("  Size: {}", packet.meta().size);
         println!("  Size: {:?}", packet.meta().flags);
         println!("PACKET : {:?}", packet);
         
-        let _result: Result<solana_ledger::shred::Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
-//            let recv_transaction: VersionedTransaction =  packet.deserialize_slice(..).unwrap();
-        
-        //    println!("!!!!!!!!!!!!!!! {:?}", recv_transaction);
-
-            //let sanitized_transaction = SanitizedVersionedTransaction::try_from(versioned_transaction)?;
-
-            
-   
-            
-            
-
-            // let shred = result.unwrap().clone();
-            // shreds.push(shred.clone());
-
-            //let something: Result<Vec<Shred>, solana_ledger::shred::Error> = solana_ledger::shred::Shredder::try_recovery(shreds, &ReedSolomonCache::default());
-            // match something {
-            //     Ok(_) => {
-            //         let serialized_shreds: Vec<Entry> = bincode::deserialize(something.unwrap()[0].payload()).expect("Expect to serialize all entries");
-            //         println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! WTF {:?}", serialized_shreds);
-            //     },
-            //     Err(_) => todo!(),
-            // }
-
-            // println!("SHRED !!! {:?}", shred.clone());
-            // match shred.shred_type() {
-            //     solana_ledger::shred::ShredType::Data => {
-            //         println!("Shred Type: Data");
-            //     }
-            //     solana_ledger::shred::ShredType::Code => {
-            //         println!("Shred Type: Code");
-            //     }
-
-            // }
-
-        //    let decoded_data: ShredData = deserialize(&result.payload()).unwrap();
-
-        //    if packet.meta().discard() {
-        //     println!("  Packet marked for discard, skipping");
-        //     continue;
-        //    }
-
-        //     if let Some(data) = packet.data(..) {
-        //     println!("  Data length: {}", data.len());
-
-        //     // Print first few bytes for debugging
-        //     if !data.is_empty() {
-        //         println!("  First bytes: {:?}", &data[..data.len().min(32)]);
-        //     }
-
-        //     // Try to deserialize the transaction
-        //     match bincode::deserialize::<VersionedTransaction>(data) {
-        //         Ok(transaction) => {
-        //             println!("  Successfully decoded transaction");
-        //         }
-        //         Err(e) => {
-        //             println!("  Failed to decode transaction: {:?}", e);
-        //         }
-        //     }
-        // } else {
-        //     println!("  No data available in packet");
-        // }
+        let _result: Result<solana_ledger::shred::Shred, solana_ledger::shred::Error> = 
+            Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec());
     }
+
     let trace_shred_received_time = SystemTime::now();
     metrics
         .agg_received
@@ -655,3 +584,4 @@ mod tests {
         );
     }
 }
+

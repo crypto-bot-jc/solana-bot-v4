@@ -17,6 +17,7 @@ const RAYDIUM_PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 pub fn recv_from_channel_and_analyse_shred(
     maybe_packet_batch: Result<PacketBatch, RecvError>,
     shred_map: &mut HashMap<(u64, u32), Vec<Shred>>,
+    shreds_to_ignore: &mut Vec<(u64, u32)>,
     total_shred_received_count: &mut u64,
 ) {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError);
@@ -24,11 +25,14 @@ pub fn recv_from_channel_and_analyse_shred(
     // println!("Packet batch: {:?}", _packet_batch.len());
     for (i, packet) in _packet_batch.iter().enumerate() {
         *total_shred_received_count += 1;
-        println!("Total shred received: {:?}", total_shred_received_count);
         let _result: Result<Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
         match _result {
             Ok(shred) => {
-                decode_shred_payload(&shred, shred_map);
+                println!("Total shred received: {:?} - {:?} - {:?}", total_shred_received_count, shred.slot(), shred.fec_set_index());
+                if shreds_to_ignore.contains(&(shred.slot(), shred.fec_set_index())) {
+                    continue;
+                }
+                decode_shred_payload(&shred, shred_map, shreds_to_ignore);
             },
             Err(error) => {
                 println!("Error during shred serialization: {:?}", error);
@@ -37,20 +41,15 @@ pub fn recv_from_channel_and_analyse_shred(
     }
 }
 
-fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>) { // -> Option<Vec<u8>> {
+fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: &mut Vec<(u64, u32)>) { // -> Option<Vec<u8>> {
     shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new).push(shred.clone());
-    let mut shred_to_follow: Vec<(u64, u32)> = Vec::new();
 
     if let Some(mut shreds) = shred_map.get(&(shred.slot(), shred.fec_set_index())) {
         for _shred in shreds { //Iterate over all shreds in the slot, because we need to check if any of the shreds is complete and last in slot
-            if shred.index() == 0 {
-                shred_to_follow.push((shred.slot(), shred.fec_set_index()));
-            }
-
             // current shred is the last shred in the slot and shred count is higer then 66% of 64 (total shred in a shred family)
-            if _shred.data_complete() && _shred.last_in_slot() { // && shreds.len() > 43 {
+            if _shred.data_complete() && _shred.last_in_slot() && shreds.len() > 43 {
                 println!("----------------------------------------");
-                println!("Found completed FEC set for slot: {:?}", shred.slot());
+                println!("Found completed FEC set for slot: {:?} FEC index {:?}", shred.slot(), shred.fec_set_index());
                 // println!("Supposed Data shreds: {:?}", solana_ledger::shred::Shredder::get_num_data_shred(shreds.clone()));
                 // println!("Supposed Code shreds: {:?}", solana_ledger::shred::Shredder::get_num_code_shred(shreds.clone()));
                 
@@ -90,6 +89,8 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                         println!("Deshred payload length: {:?}", deshred_payload.len());
                         let deshred_entries: Vec<Entry> = bincode::deserialize(&deshred_payload).unwrap();
                         println!("Deshred entries length: {:?}", deshred_entries.len());
+                        println!("Hash map keys: {:?}", shred_map.keys());
+                        shreds_to_ignore.push((shred.slot(), shred.fec_set_index()));
                         // println!("Deshred entries: {:?}", deshred_entries);
                         // println!("Entries: {:?}", deshred_entries);
 
@@ -138,3 +139,4 @@ fn get_discriminator(instruction_name: &str, param:Option<&str>) -> Vec<u8> {
     let hash = hasher.finalize();
     hash[..8].to_vec() // First 8 bytes of the SHA-256 hash as the discriminator
 }
+
