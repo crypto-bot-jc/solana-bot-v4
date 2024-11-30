@@ -126,7 +126,15 @@ fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred
             log_info!(LOG_FILE, "Cleansed shreds length: {:?}", cleansed_shreds.len());
             let deshred_payload = Shredder::deshred(&cleansed_shreds).unwrap();
             log_info!(LOG_FILE, "Deshred payload length: {:?}", deshred_payload.len());
-            let deshred_entries: Vec<Entry> = bincode::deserialize(&deshred_payload).unwrap();
+            let deshred_entries = {
+                match bincode::deserialize(&deshred_payload) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        log_info!(LOG_FILE, "Error during deserialization: {:?}", error);
+                        return Err(solana_ledger::shred::Error::InvalidRecoveredShred);
+                    }        
+                }
+            };
             pumpfun_decompile(&deshred_entries, shreds.first().unwrap().slot());
             Ok(deshred_entries)
         },
