@@ -17,7 +17,7 @@ use bincode::{deserialize, Error};
 
 use itertools::Itertools;
 
-use crate::analyser::{self, recv_from_channel_and_analyse_shred}; 
+use crate::analyser::{self, recv_from_channel_and_analyse_shred, ShredEntry}; 
 use jito_protos::trace_shred::TraceShred;
 
 use log::{debug, error, info, warn};

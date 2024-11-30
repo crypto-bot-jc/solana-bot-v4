@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fs::OpenOptions, io::Write, mem, str::FromStr, thread, time::{self, Instant}};
 use bot::solana::transaction::{message::TransactionStatusMeta, DecodedInstruction, PFCreateInstruction};
-use chrono::Utc;
+use chrono::{Utc, DateTime, NaiveDateTime};
 use lazy_static::lazy_static;
 use prost_types::Any;
 use sha2::{Digest, Sha256};
@@ -24,19 +24,49 @@ lazy_static! {
     static ref RUNNING_THREADS: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
 }
 
+#[derive(Clone)]
+pub struct ShredEntry {
+    starting_timestamp: String,
+    shreds: Vec<Shred>,
+}
+
+impl ShredEntry {
+    fn new(shred: Shred) -> Self {
+        let now = Utc::now();
+        Self {
+            starting_timestamp: now.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+            shreds: vec![shred],
+        }
+    }
+
+    fn add_shred(&mut self, shred: Shred) {
+        self.shreds.push(shred);
+    }
+
+    fn is_complete(&self) -> bool {
+        self.shreds.iter().any(|s| s.data_complete()) && self.shreds.len() > 48
+    }
+
+    fn get_processing_time(&self) -> String {
+        let start_time = DateTime::parse_from_str(&format!("{} +0000", self.starting_timestamp), "%Y-%m-%d %H:%M:%S%.3f %z")
+            .expect("Failed to parse starting timestamp");
+        let now = Utc::now();
+        let duration = now.signed_duration_since(start_time);
+        format!("{}.{:03} seconds", 
+            duration.num_milliseconds() / 1000,
+            duration.num_milliseconds() % 1000)
+    }
+}
+
 pub fn recv_from_channel_and_analyse_shred(
     maybe_packet_batch: Result<PacketBatch, RecvError>,
-    shred_map: Arc<Mutex<HashMap<(u64, u32), Vec<Shred>>>>,
+    shred_map: Arc<Mutex<HashMap<(u64, u32), ShredEntry>>>,
     shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>,
     total_shred_received_count: &mut u64,
 ) {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError);
     let _packet_batch = packet_batch.unwrap();
     
-    if let Ok(map) = shred_map.lock() {
-        println!("The useful size of `shred_map` is {}", calculate_hashmap_size(&*map));
-    }
-
     for (i, packet) in _packet_batch.iter().enumerate() {
         *total_shred_received_count += 1;
         let _result: Result<Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
@@ -110,7 +140,7 @@ fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred
 
 fn decode_shred_payload(
     shred: &Shred,
-    shred_map: Arc<Mutex<HashMap<(u64, u32), Vec<Shred>>>>,
+    shred_map: Arc<Mutex<HashMap<(u64, u32), ShredEntry>>>,
     shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>,
 ) {
     let key = (shred.slot(), shred.fec_set_index());
@@ -118,31 +148,27 @@ fn decode_shred_payload(
     // Add shred to map
     {
         if let Ok(mut map) = shred_map.lock() {
-            map.entry(key).or_insert_with(Vec::new).push(shred.clone());
+            map.entry(key)
+                .and_modify(|entry| entry.add_shred(shred.clone()))
+                .or_insert_with(|| ShredEntry::new(shred.clone()));
         }
     }
 
     // Check if we should process
-    let should_process = {
+    let (should_process, shreds_clone, entry_clone) = {
         if let Ok(map) = shred_map.lock() {
-            map.get(&key)
-                .map(|shreds| shreds.iter().any(|s| s.data_complete()) && shreds.len() > 48)
-                .unwrap_or(false)
+            if let Some(entry) = map.get(&key) {
+                (entry.is_complete(), Some(entry.shreds.clone()), Some(entry.clone()))
+            } else {
+                (false, None, None)
+            }
         } else {
-            false
+            (false, None, None)
         }
     };
 
     if should_process {
-        let shreds_clone = {
-            if let Ok(map) = shred_map.lock() {
-                map.get(&key).map(|s| s.clone())
-            } else {
-                None
-            }
-        };
-
-        if let Some(shreds) = shreds_clone {
+        if let (Some(shreds), Some(entry)) = (shreds_clone, entry_clone) {
             let thread_counter: Arc<Mutex<usize>> = Arc::clone(&RUNNING_THREADS);
             let current_threads = {
                 let count = thread_counter.lock().unwrap();
@@ -152,6 +178,11 @@ fn decode_shred_payload(
             if current_threads >= num_cpus::get() {
                 // Too many threads, process synchronously
                 if let Ok(_entries) = decode_payload(shreds.clone()) {
+                    println!("Processing time for slot {:?} FEC index {:?}: {}", 
+                        shred.slot(), 
+                        shred.fec_set_index(),
+                        entry.get_processing_time()
+                    );
                     if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
                         ignore_list.push(key);
                         println!("Added to shreds_to_ignore (sync): {:?}", key);
@@ -175,10 +206,16 @@ fn decode_shred_payload(
             let thread_counter = Arc::clone(&thread_counter);
             let shreds_to_ignore_thread = Arc::clone(&shreds_to_ignore);
             let shred_map_thread = Arc::clone(&shred_map);
+            let entry_clone = entry.clone();
 
             let handle = thread::spawn(move || {
                 match decode_payload(shreds.clone()) {
                     Ok(_entries) => {
+                        println!("Processing time for slot {:?} FEC index {:?}: {}", 
+                            shred_clone.slot(), 
+                            shred_clone.fec_set_index(),
+                            entry_clone.get_processing_time()
+                        );
                         if let Ok(mut ignore_list) = shreds_to_ignore_thread.lock() {
                             ignore_list.push(key);
                             println!("Added to shreds_to_ignore (async thread): {:?}", key);
@@ -303,18 +340,20 @@ fn get_discriminator(instruction_name: &str, param:Option<&str>) -> Vec<u8> {
     hash[..8].to_vec() // First 8 bytes of the SHA-256 hash as the discriminator
 }
 
-fn calculate_hashmap_size(hashmap: &HashMap<(u64, u32), Vec<Shred>>) -> usize {
-    let mut total_size = mem::size_of::<HashMap<(u64, u32), Vec<Shred>>>(); // HashMap overhead
+fn calculate_hashmap_size(hashmap: &HashMap<(u64, u32), ShredEntry>) -> usize {
+    let mut total_size = mem::size_of::<HashMap<(u64, u32), ShredEntry>>(); // HashMap overhead
 
     for (key, value) in hashmap.iter() {
         // Size of the key
         total_size += mem::size_of_val(key);
 
-        // Size of the Vec metadata
-        total_size += mem::size_of_val(value);
+        // Size of the ShredEntry
+        total_size += mem::size_of_val(&value.starting_timestamp);
+        total_size += value.starting_timestamp.capacity();
 
-        // Dynamic allocation for the Vec<Shred>
-        for shred in value.iter() {
+        // Size of the Vec<Shred>
+        total_size += mem::size_of_val(&value.shreds);
+        for shred in value.shreds.iter() {
             total_size += mem::size_of_val(shred); // Size of the Shred struct
             total_size += shred.payload().capacity();  // Dynamic allocation for `Vec<u8>` inside `Shred`
         }
