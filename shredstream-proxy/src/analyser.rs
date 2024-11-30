@@ -41,34 +41,18 @@ pub fn recv_from_channel_and_analyse_shred(
     }
 }
 
+// Optimization ideas
+// Multi thread with a modulo of the slot number + fec_set_index % number of threads
+// Solve issue related to TooFewShardsPresent
+    // To solve this issue could check if the number of shreds of NON DUPLICATES is higher than 48
+    // However, sometime we seem to be able to decode with less then 48 shreds, so maybe 48 is the garantee number?
+
 fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: &mut Vec<(u64, u32)>) { // -> Option<Vec<u8>> {
-    // Only add non-duplicate shreds to the map
-    let existing_shred  = match shred_map.get(&(shred.slot(), shred.fec_set_index())) {
-        Some(shreds) => {
-            let shred = shreds.iter().find(|s| s.index() == shred.index() && s.is_code() == shred.is_data());
-            if shred.is_some() {
-                println!("Duplicate shred found: {:?}", shred.unwrap().index());
-            }
-            shred
-        },
-        None => {
-            // Create a new entry in the map if not already present
-            shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new);
-            None
-        }
-    };
-
-    if existing_shred.is_some() {
-        return;
-    }
-
-    shred_map.entry((shred.slot(), shred.fec_set_index())).and_modify(|shreds| {
-        shreds.push(shred.clone());
-    });
+    shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new).push(shred.clone());
 
     if let Some(mut shreds) = shred_map.get(&(shred.slot(), shred.fec_set_index())) {
         for _shred in shreds { //Iterate over all shreds in the slot, because we need to check if any of the shreds is complete and last in slot
-            if _shred.data_complete() && shreds.len() > 43 {
+            if _shred.data_complete() && shreds.len() > 48 {
                 println!("----------------------------------------");
                 println!("Found completed FEC set for slot: {:?} FEC index {:?}", shred.slot(), shred.fec_set_index());
                 println!("Completed shred properties: data_complete {:?}, last_in_slot {:?}", _shred.data_complete(), _shred.last_in_slot());
@@ -151,9 +135,10 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                         let elapsed_time = start_time.elapsed();
                         println!("Time taken for failed recovery: {:?}", elapsed_time);
                         println!("Error during recovery: {:?}", error);
-                        println!("Failing shreds {:?}", shreds.iter().map(|s| (s.index(), s.is_data())).collect::<Vec<(u32, bool)>>());
                     }
                 }
+                println!("Shreds pair {:?}", shreds.iter().map(|s| (s.index(), s.is_data())).collect::<Vec<(u32, bool)>>());
+                println!("----------------------------------------");
             } else {
             }
         }
