@@ -26,13 +26,17 @@ lazy_static! {
 
 pub fn recv_from_channel_and_analyse_shred(
     maybe_packet_batch: Result<PacketBatch, RecvError>,
-    shred_map: &mut HashMap<(u64, u32), Vec<Shred>>,
+    shred_map: Arc<Mutex<HashMap<(u64, u32), Vec<Shred>>>>,
     shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>,
     total_shred_received_count: &mut u64,
 ) {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError);
     let _packet_batch = packet_batch.unwrap();
-    println!("The useful size of `shred_map` is {}", calculate_hashmap_size(&*shred_map));
+    
+    if let Ok(map) = shred_map.lock() {
+        println!("The useful size of `shred_map` is {}", calculate_hashmap_size(&*map));
+    }
+
     for (i, packet) in _packet_batch.iter().enumerate() {
         *total_shred_received_count += 1;
         let _result: Result<Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
@@ -58,7 +62,7 @@ pub fn recv_from_channel_and_analyse_shred(
                 if should_ignore {
                     continue;
                 }
-                decode_shred_payload(&shred, shred_map, Arc::clone(&shreds_to_ignore));
+                decode_shred_payload(&shred, Arc::clone(&shred_map), Arc::clone(&shreds_to_ignore));
             },
             Err(error) => {
                 println!("Error during shred serialization: {:?}", error);
@@ -104,67 +108,107 @@ fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred
     }
 }
 
-fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>) {
-    shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new).push(shred.clone());
+fn decode_shred_payload(
+    shred: &Shred,
+    shred_map: Arc<Mutex<HashMap<(u64, u32), Vec<Shred>>>>,
+    shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>,
+) {
+    let key = (shred.slot(), shred.fec_set_index());
+    
+    // Add shred to map
+    {
+        if let Ok(mut map) = shred_map.lock() {
+            map.entry(key).or_insert_with(Vec::new).push(shred.clone());
+        }
+    }
 
-    if let Some(shreds) = shred_map.get(&(shred.slot(), shred.fec_set_index())) {
-        for _shred in shreds {
-            if _shred.data_complete() && shreds.len() > 48 {
-                let thread_counter: Arc<Mutex<usize>> = Arc::clone(&RUNNING_THREADS);
-                let current_threads = {
-                    let count = thread_counter.lock().unwrap();
-                    *count
-                };
+    // Check if we should process
+    let should_process = {
+        if let Ok(map) = shred_map.lock() {
+            map.get(&key)
+                .map(|shreds| shreds.iter().any(|s| s.data_complete()) && shreds.len() > 48)
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    };
 
-                if current_threads >= num_cpus::get() {
-                    // Too many threads, process synchronously
-                    decode_payload(shreds.clone());
-                    if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
-                        ignore_list.push((shred.slot(), shred.fec_set_index()));
-                    }
-                    continue;
-                }
-
-                // Increment thread counter
-                {
-                    let mut count = thread_counter.lock().unwrap();
-                    *count += 1;
-                    println!("Active threads: {}", *count);
-                }
-
-                let shreds_clone = shreds.clone();
-                let shred_clone = shred.clone();
-                let thread_counter = Arc::clone(&thread_counter);
-                let shreds_to_ignore_thread = Arc::clone(&shreds_to_ignore);
-                let shreds_to_ignore_main = Arc::clone(&shreds_to_ignore);
-
-                let handle = thread::spawn(move || {
-                    match decode_payload(shreds_clone) {
-                        Ok(_entries) => {
-                            if let Ok(mut ignore_list) = shreds_to_ignore_thread.lock() {
-                                ignore_list.push((shred_clone.slot(), shred_clone.fec_set_index()));
-                                println!("Added to shreds_to_ignore (async thread): {:?}", (shred_clone.slot(), shred_clone.fec_set_index()));
-                            }
-                        },
-                        Err(error) => {
-                            println!("Error during shred recovery: {:?}", error);
-                        }
-                    }
-                    
-                    // Decrement thread counter when done
-                    let mut count = thread_counter.lock().unwrap();
-                    *count -= 1;
-                    println!("Thread completed. Active threads: {}", *count);
-                });
-
-                // Add the processed slot/fec_set to ignore list
-                if let Ok(mut ignore_list) = shreds_to_ignore_main.lock() {
-                    ignore_list.push((shred.slot(), shred.fec_set_index()));
-                    println!("Added to shreds_to_ignore (main): {:?}", (shred.slot(), shred.fec_set_index()));
-                }
-                println!("----------------------------------------");
-                break; // Exit the loop after spawning the thread
+    if should_process {
+        let shreds_clone = {
+            if let Ok(map) = shred_map.lock() {
+                map.get(&key).map(|s| s.clone())
+            } else {
+                None
             }
+        };
+
+        if let Some(shreds) = shreds_clone {
+            let thread_counter: Arc<Mutex<usize>> = Arc::clone(&RUNNING_THREADS);
+            let current_threads = {
+                let count = thread_counter.lock().unwrap();
+                *count
+            };
+
+            if current_threads >= num_cpus::get() {
+                // Too many threads, process synchronously
+                if let Ok(_entries) = decode_payload(shreds.clone()) {
+                    if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
+                        ignore_list.push(key);
+                        println!("Added to shreds_to_ignore (sync): {:?}", key);
+                    }
+                    if let Ok(mut map) = shred_map.lock() {
+                        map.remove(&key);
+                        println!("Removed from shred_map (sync): {:?}", key);
+                    }
+                }
+                return;
+            }
+
+            // Increment thread counter
+            {
+                let mut count = thread_counter.lock().unwrap();
+                *count += 1;
+                println!("Active threads: {}", *count);
+            }
+
+            let shred_clone = shred.clone();
+            let thread_counter = Arc::clone(&thread_counter);
+            let shreds_to_ignore_thread = Arc::clone(&shreds_to_ignore);
+            let shred_map_thread = Arc::clone(&shred_map);
+
+            let handle = thread::spawn(move || {
+                match decode_payload(shreds.clone()) {
+                    Ok(_entries) => {
+                        if let Ok(mut ignore_list) = shreds_to_ignore_thread.lock() {
+                            ignore_list.push(key);
+                            println!("Added to shreds_to_ignore (async thread): {:?}", key);
+                        }
+                        if let Ok(mut map) = shred_map_thread.lock() {
+                            map.remove(&key);
+                            println!("Removed from shred_map (async thread): {:?}", key);
+                        }
+                    },
+                    Err(error) => {
+                        println!("Error during shred recovery: {:?}", error);
+                    }
+                }
+                
+                // Decrement thread counter when done
+                let mut count = thread_counter.lock().unwrap();
+                *count -= 1;
+                println!("Thread completed. Active threads: {}", *count);
+            });
+
+            // Add the processed slot/fec_set to ignore list and remove from map
+            if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
+                ignore_list.push(key);
+                println!("Added to shreds_to_ignore (main): {:?}", key);
+            }
+            if let Ok(mut map) = shred_map.lock() {
+                map.remove(&key);
+                println!("Removed from shred_map (main): {:?}", key);
+            }
+            println!("----------------------------------------");
         }
     }
 }

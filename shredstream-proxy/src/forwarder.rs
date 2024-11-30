@@ -99,7 +99,7 @@ pub fn start_forwarder_threads(
     let shutdown_receiver = shutdown_receiver.clone();
     let exit = exit.clone();
 
-    let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
+    let shred_map = Arc::new(Mutex::new(HashMap::new()));
     let mut total_shred_received_count = 0;
     let shreds_to_ignore = Arc::new(Mutex::new(Vec::new()));
     
@@ -113,7 +113,7 @@ pub fn start_forwarder_threads(
                     recv(packet_receiver) -> maybe_packet_batch => {
                         let res = recv_from_channel_and_analyse_shred(
                             maybe_packet_batch,
-                            &mut shred_map,
+                            Arc::clone(&shred_map),
                             Arc::clone(&shreds_to_ignore),
                             &mut total_shred_received_count
                         );
