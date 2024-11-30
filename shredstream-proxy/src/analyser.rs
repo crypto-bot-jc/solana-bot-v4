@@ -14,10 +14,11 @@ use solana_ledger::{blockstore_db::columns::TransactionStatus, shred::{ReedSolom
 use solana_perf::packet::PacketBatch;
 use crossbeam_channel::{Receiver, RecvError, Sender, TrySendError};
 
-use crate::ShredstreamProxyError;
+use crate::{ShredstreamProxyError, log_info};
 
 const PUMPFUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+const LOG_FILE: &str = "shredstream.log";
 
 // Global thread counter
 lazy_static! {
@@ -73,13 +74,13 @@ pub fn recv_from_channel_and_analyse_shred(
         match _result {
             Ok(shred) => {
                 let now = Utc::now();
-                let mut file = OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open("shreds.txt");
-                writeln!(file.unwrap(), "Total shred received: {}, {:?} - {:?} - {:?}",
-                    now.format("%Y-%m-%d %H:%M:%S%.3f"), total_shred_received_count, shred.slot(), shred.fec_set_index()
-                );
+                // let mut file = OpenOptions::new()
+                //     .append(true)
+                //     .create(true)
+                //     .open("shreds.txt");
+                // writeln!(file.unwrap(), "Total shred received: {}, {:?} - {:?} - {:?}",
+                //     now.format("%Y-%m-%d %H:%M:%S%.3f"), total_shred_received_count, shred.slot(), shred.fec_set_index()
+                // );
 
                 let should_ignore = {
                     if let Ok(ignore_list) = shreds_to_ignore.lock() {
@@ -95,7 +96,7 @@ pub fn recv_from_channel_and_analyse_shred(
                 decode_shred_payload(&shred, Arc::clone(&shred_map), Arc::clone(&shreds_to_ignore));
             },
             Err(error) => {
-                println!("Error during shred serialization: {:?}", error);
+                log_info!(LOG_FILE, "Error during shred serialization: {:?}", error);
             },
         }
     }
@@ -104,14 +105,14 @@ pub fn recv_from_channel_and_analyse_shred(
 fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred::Error> {
     let recovered_shreds = solana_ledger::shred::recover_public((shreds).to_vec(), &ReedSolomonCache::default());
     let start_time = Instant::now();
-    println!("----------------------------------------");
-    println!("Found completed FEC set for slot: {:?} FEC index {:?}", shreds.first().unwrap().slot(), shreds.first().unwrap().fec_set_index());
-    println!("Recovered (success or fail) shreds length");
+    log_info!(LOG_FILE, "----------------------------------------");
+    log_info!(LOG_FILE, "Found completed FEC set for slot: {:?} FEC index {:?}", shreds.first().unwrap().slot(), shreds.first().unwrap().fec_set_index());
+    log_info!(LOG_FILE, "Recovered (success or fail) shreds length");
     match recovered_shreds {
         Ok(mut _shreds) => {
-            println!("Recovered shreds length solomon-reed: {:?}", _shreds.len());
+            log_info!(LOG_FILE, "Recovered shreds length solomon-reed: {:?}", _shreds.len());
             _shreds.extend(shreds.iter().cloned());
-            println!("Recovered shreds length final: {:?}", _shreds.len());
+            log_info!(LOG_FILE, "Recovered shreds length final: {:?}", _shreds.len());
             let mut shreds_ordered_by_index = _shreds.clone();
             shreds_ordered_by_index.sort_by_key(|s| s.index());
             let mut cleansed_shreds: Vec<Shred> = Vec::new();
@@ -122,17 +123,17 @@ fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred
                     cleansed_shred_index.push(shred_ordered.index());
                 }
             }
-            println!("Cleansed shreds length: {:?}", cleansed_shreds.len());
+            log_info!(LOG_FILE, "Cleansed shreds length: {:?}", cleansed_shreds.len());
             let deshred_payload = Shredder::deshred(&cleansed_shreds).unwrap();
-            println!("Deshred payload length: {:?}", deshred_payload.len());
+            log_info!(LOG_FILE, "Deshred payload length: {:?}", deshred_payload.len());
             let deshred_entries: Vec<Entry> = bincode::deserialize(&deshred_payload).unwrap();
             pumpfun_decompile(&deshred_entries, shreds.first().unwrap().slot());
             Ok(deshred_entries)
         },
         Err(error) => {
             let elapsed_time = start_time.elapsed();
-            println!("Time taken for failed recovery: {:?}", elapsed_time);
-            println!("Error during recovery: {:?}", error);
+            log_info!(LOG_FILE, "Time taken for failed recovery: {:?}", elapsed_time);
+            log_info!(LOG_FILE, "Error during recovery: {:?}", error);
             Err(error)
         }
     }
@@ -178,18 +179,18 @@ fn decode_shred_payload(
             if current_threads >= num_cpus::get() {
                 // Too many threads, process synchronously
                 if let Ok(_entries) = decode_payload(shreds.clone()) {
-                    println!("Processing time for slot {:?} FEC index {:?}: {}", 
+                    log_info!(LOG_FILE, "Processing time for slot {:?} FEC index {:?}: {}", 
                         shred.slot(), 
                         shred.fec_set_index(),
                         entry.get_processing_time()
                     );
                     if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
                         ignore_list.push(key);
-                        println!("Added to shreds_to_ignore (sync): {:?}", key);
+                        log_info!(LOG_FILE, "Added to shreds_to_ignore (sync): {:?}", key);
                     }
                     if let Ok(mut map) = shred_map.lock() {
                         map.remove(&key);
-                        println!("Removed from shred_map (sync): {:?}", key);
+                        log_info!(LOG_FILE, "Removed from shred_map (sync): {:?}", key);
                     }
                 }
                 return;
@@ -199,7 +200,7 @@ fn decode_shred_payload(
             {
                 let mut count = thread_counter.lock().unwrap();
                 *count += 1;
-                println!("Active threads: {}", *count);
+                log_info!(LOG_FILE, "Active threads: {}", *count);
             }
 
             let shred_clone = shred.clone();
@@ -211,41 +212,41 @@ fn decode_shred_payload(
             let handle = thread::spawn(move || {
                 match decode_payload(shreds.clone()) {
                     Ok(_entries) => {
-                        println!("Processing time for slot {:?} FEC index {:?}: {}", 
+                        log_info!(LOG_FILE, "Processing time for slot {:?} FEC index {:?}: {}", 
                             shred_clone.slot(), 
                             shred_clone.fec_set_index(),
                             entry_clone.get_processing_time()
                         );
                         if let Ok(mut ignore_list) = shreds_to_ignore_thread.lock() {
                             ignore_list.push(key);
-                            println!("Added to shreds_to_ignore (async thread): {:?}", key);
+                            log_info!(LOG_FILE, "Added to shreds_to_ignore (async thread): {:?}", key);
                         }
                         if let Ok(mut map) = shred_map_thread.lock() {
                             map.remove(&key);
-                            println!("Removed from shred_map (async thread): {:?}", key);
+                            log_info!(LOG_FILE, "Removed from shred_map (async thread): {:?}", key);
                         }
                     },
                     Err(error) => {
-                        println!("Error during shred recovery: {:?}", error);
+                        log_info!(LOG_FILE, "Error during shred recovery: {:?}", error);
                     }
                 }
                 
                 // Decrement thread counter when done
                 let mut count = thread_counter.lock().unwrap();
                 *count -= 1;
-                println!("Thread completed. Active threads: {}", *count);
+                log_info!(LOG_FILE, "Thread completed. Active threads: {}", *count);
             });
 
             // Add the processed slot/fec_set to ignore list and remove from map
             if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
                 ignore_list.push(key);
-                println!("Added to shreds_to_ignore (main): {:?}", key);
+                log_info!(LOG_FILE, "Added to shreds_to_ignore (main): {:?}", key);
             }
             if let Ok(mut map) = shred_map.lock() {
                 map.remove(&key);
-                println!("Removed from shred_map (main): {:?}", key);
+                log_info!(LOG_FILE, "Removed from shred_map (main): {:?}", key);
             }
-            println!("----------------------------------------");
+            log_info!(LOG_FILE, "----------------------------------------");
         }
     }
 }
@@ -259,7 +260,7 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
         })
     });
 
-    println!("Contains Pumpfun: {}", contains_pumpfun);
+    log_info!(LOG_FILE, "Contains Pumpfun: {}", contains_pumpfun);
 
     let instructions = ["buy", "sell", "create", "setparams", "initialize", "withdraw"];
 
@@ -282,17 +283,16 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                             instruction.data.starts_with(&discriminator)
                         });
                         
-                        println!("Pumpfun idle instruction {:?}", idl_instruction.unwrap());
-                        
-                        println!("Pumpfun instruction found");
-                        println!("Transaction signature: {:?}", signature);
-                        println!("{}", program_id.to_string());
+                        log_info!(LOG_FILE, "Pumpfun idle instruction {:?}", idl_instruction.unwrap());
+                        log_info!(LOG_FILE, "Pumpfun instruction found");
+                        log_info!(LOG_FILE, "Transaction signature: {:?}", signature);
+                        log_info!(LOG_FILE, "{}", program_id.to_string());
                         
                         match idl_instruction {
                             Some(&"buy") => {
-                                println!("Pumpfun Buy instruction");
+                                log_info!(LOG_FILE, "Pumpfun Buy instruction");
                                 let (amount, max_sol_cost): (u64, u64) = bincode::deserialize(&instruction.data[8..]).expect("Failed to Deserialize");
-                                println!("Amount: {:?} - Max sol count: {:?}", amount, max_sol_cost);
+                                log_info!(LOG_FILE, "Amount: {:?} - Max sol count: {:?}", amount, max_sol_cost);
                             },
                             Some(&"create") => {
                                 match <(String, String, String)>::try_from_slice(&instruction.data[8..]) {
@@ -302,24 +302,26 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                                             .append(true)
                                             .create(true)
                                             .open("pumpfun_token_creation.txt");
-                                        writeln!(file.unwrap(), "Pumpfun Create instruction: {}, {}, {}, {}",
+                                        writeln!(file.unwrap(), "Pumpfun Create instruction: {}, {}, {}, {}, {}",
                                             now.format("%Y-%m-%d %H:%M:%S%.3f"),
                                             data.0,
                                             slot,
                                             signature,
+                                            transaction.message.static_account_keys()[instruction.accounts[0] as usize],
                                         );
-                                        println!("Pumpfun Create instruction: {}, {}, {}, {}",
+                                        log_info!(LOG_FILE, "Pumpfun Create instruction: {}, {}, {}, {}, {}",
                                             now.format("%Y-%m-%d %H:%M:%S%.3f"),
                                             data.0,
                                             data.1,
-                                            data.2
+                                            data.2,
+                                            transaction.message.static_account_keys()[instruction.accounts[0] as usize]
                                         );
                                     }
                                     Err(_) => {}
                                 }
                             }
                             _ => {
-                                println!("Pumpfun instruction not found");
+                                log_info!(LOG_FILE, "Pumpfun instruction not found");
                             }
                         }
                     }

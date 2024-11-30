@@ -15,7 +15,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use clap::{arg, Parser};
+use clap::{arg, Parser, ValueEnum};
 use crossbeam_channel::{Receiver, RecvError, Sender};
 use log::*;
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -27,19 +27,46 @@ use thiserror::Error;
 use tokio::runtime::Runtime;
 use tonic::Status;
 
-use crate::{forwarder::ShredMetrics, token_authenticator::BlockEngineConnectionError};
+use crate::{forwarder::ShredMetrics, token_authenticator::BlockEngineConnectionError, logger::LogMode};
 
-mod analyser;
-mod forwarder;
+pub mod analyser;
+pub mod forwarder;
 mod heartbeat;
+pub mod logger;
 mod token_authenticator;
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum LogModeArg {
+    /// Disable all logging
+    Disabled,
+    /// Log to console only
+    ConsoleOnly,
+    /// Log to file only
+    FileOnly,
+    /// Log to both console and file
+    Both,
+}
+
+impl From<LogModeArg> for LogMode {
+    fn from(arg: LogModeArg) -> Self {
+        match arg {
+            LogModeArg::Disabled => LogMode::Disabled,
+            LogModeArg::ConsoleOnly => LogMode::ConsoleOnly,
+            LogModeArg::FileOnly => LogMode::FileOnly,
+            LogModeArg::Both => LogMode::Both,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Parser)]
 #[clap(author, version, about, long_about = None)]
-// https://docs.rs/clap/latest/clap/_derive/_cookbook/git_derive/index.html
 struct Args {
     #[command(subcommand)]
     shredstream_args: ProxySubcommands,
+
+    /// Configure logging mode
+    #[arg(long, value_enum, default_value = "both")]
+    log_mode: LogModeArg,
 }
 
 #[derive(Clone, Debug, clap::Subcommand)]
@@ -175,6 +202,9 @@ fn main() -> Result<(), ShredstreamProxyError> {
     env_logger::builder().init();
     let all_args: Args = Args::parse();
 
+    // Initialize logging with the command line argument
+    logger::set_log_mode(all_args.log_mode.into());
+
     let shredstream_args = all_args.shredstream_args.clone();
     // common args
     let args = match all_args.shredstream_args {
@@ -220,7 +250,7 @@ fn main() -> Result<(), ShredstreamProxyError> {
         forwarder::DEDUPER_NUM_BITS,
     )));
 
-        let forwarder_hdls = forwarder::start_forwarder_threads(
+    let forwarder_hdls = forwarder::start_forwarder_threads(
         args.src_bind_addr,
         args.src_bind_port,
         args.num_threads,

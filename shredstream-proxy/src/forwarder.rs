@@ -35,8 +35,9 @@ use solana_streamer::{
     streamer::StreamerReceiveStats,
 };
 
-use crate::{resolve_hostname_port, ShredstreamProxyError};
+use crate::{resolve_hostname_port, ShredstreamProxyError, log_info};
 
+const LOG_FILE: &str = "shredstream.log";
 pub const DEDUPER_FALSE_POSITIVE_RATE: f64 = 0.001;
 pub const DEDUPER_NUM_BITS: u64 = 637_534_199; // 76MB
 pub const DEDUPER_RESET_CYCLE: Duration = Duration::from_secs(5 * 60);
@@ -142,14 +143,14 @@ fn recv_from_channel_and_send_multiple_dest(
     metrics: &ShredMetrics,
 ) -> Result<(), ShredstreamProxyError> {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError)?;
-    println!("PacketBatch contains {} packets", packet_batch.len());
+    log_info!(LOG_FILE, "PacketBatch contains {} packets", packet_batch.len());
 
     for (i, packet) in packet_batch.iter().enumerate() {
-        println!("\nDecoding packet {}:", i);
-        println!("  Meta: {:?}", packet.meta());
-        println!("  Size: {}", packet.meta().size);
-        println!("  Size: {:?}", packet.meta().flags);
-        println!("PACKET : {:?}", packet);
+        log_info!(LOG_FILE, "\nDecoding packet {}:", i);
+        log_info!(LOG_FILE, "  Meta: {:?}", packet.meta());
+        log_info!(LOG_FILE, "  Size: {}", packet.meta().size);
+        log_info!(LOG_FILE, "  Size: {:?}", packet.meta().flags);
+        log_info!(LOG_FILE, "PACKET : {:?}", packet);
         
         let _result: Result<solana_ledger::shred::Shred, solana_ledger::shred::Error> = 
             Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec());
