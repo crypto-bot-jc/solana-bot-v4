@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::OpenOptions, io::Write, str::FromStr, thread, time::{self, Instant}};
+use std::{collections::HashMap, fs::OpenOptions, io::Write, mem, str::FromStr, thread, time::{self, Instant}};
 use bot::solana::transaction::{message::TransactionStatusMeta, DecodedInstruction, PFCreateInstruction};
 use chrono::Utc;
 use lazy_static::lazy_static;
@@ -27,22 +27,38 @@ lazy_static! {
 pub fn recv_from_channel_and_analyse_shred(
     maybe_packet_batch: Result<PacketBatch, RecvError>,
     shred_map: &mut HashMap<(u64, u32), Vec<Shred>>,
-    shreds_to_ignore: &mut Vec<(u64, u32)>,
+    shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>,
     total_shred_received_count: &mut u64,
 ) {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError);
     let _packet_batch = packet_batch.unwrap();
-    // println!("Packet batch: {:?}", _packet_batch.len());
+    println!("The useful size of `shred_map` is {}", calculate_hashmap_size(&*shred_map));
     for (i, packet) in _packet_batch.iter().enumerate() {
         *total_shred_received_count += 1;
         let _result: Result<Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
         match _result {
             Ok(shred) => {
-                // println!("Total shred received: {:?} - {:?} - {:?}", total_shred_received_count, shred.slot(), shred.fec_set_index());
-                if shreds_to_ignore.contains(&(shred.slot(), shred.fec_set_index())) {
+                let now = Utc::now();
+                let mut file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open("shreds.txt");
+                writeln!(file.unwrap(), "Total shred received: {}, {:?} - {:?} - {:?}",
+                    now.format("%Y-%m-%d %H:%M:%S%.3f"), total_shred_received_count, shred.slot(), shred.fec_set_index()
+                );
+
+                let should_ignore = {
+                    if let Ok(ignore_list) = shreds_to_ignore.lock() {
+                        ignore_list.contains(&(shred.slot(), shred.fec_set_index()))
+                    } else {
+                        false
+                    }
+                };
+
+                if should_ignore {
                     continue;
                 }
-                decode_shred_payload(&shred, shred_map, shreds_to_ignore);
+                decode_shred_payload(&shred, shred_map, Arc::clone(&shreds_to_ignore));
             },
             Err(error) => {
                 println!("Error during shred serialization: {:?}", error);
@@ -51,7 +67,7 @@ pub fn recv_from_channel_and_analyse_shred(
     }
 }
 
-fn decode_payload(shreds: Vec<Shred>) {
+fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred::Error> {
     let recovered_shreds = solana_ledger::shred::recover_public((shreds).to_vec(), &ReedSolomonCache::default());
     let start_time = Instant::now();
     println!("----------------------------------------");
@@ -76,19 +92,19 @@ fn decode_payload(shreds: Vec<Shred>) {
             let deshred_payload = Shredder::deshred(&cleansed_shreds).unwrap();
             println!("Deshred payload length: {:?}", deshred_payload.len());
             let deshred_entries: Vec<Entry> = bincode::deserialize(&deshred_payload).unwrap();
-            pumpfun_decompile(deshred_entries, shreds.first().unwrap().slot());
-            // let lamports:u64 = bincode::deserialize(&deshred_entries[0].transactions[0].message.instructions()[0].data[48..56]).expect("Failed to Deserialize");
-            // println!("Lamports: {:?}", lamports);
+            pumpfun_decompile(&deshred_entries, shreds.first().unwrap().slot());
+            Ok(deshred_entries)
         },
         Err(error) => {
             let elapsed_time = start_time.elapsed();
             println!("Time taken for failed recovery: {:?}", elapsed_time);
             println!("Error during recovery: {:?}", error);
+            Err(error)
         }
     }
 }
 
-fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: &mut Vec<(u64, u32)>) {
+fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>) {
     shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new).push(shred.clone());
 
     if let Some(shreds) = shred_map.get(&(shred.slot(), shred.fec_set_index())) {
@@ -103,6 +119,9 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                 if current_threads >= num_cpus::get() {
                     // Too many threads, process synchronously
                     decode_payload(shreds.clone());
+                    if let Ok(mut ignore_list) = shreds_to_ignore.lock() {
+                        ignore_list.push((shred.slot(), shred.fec_set_index()));
+                    }
                     continue;
                 }
 
@@ -114,8 +133,23 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                 }
 
                 let shreds_clone = shreds.clone();
+                let shred_clone = shred.clone();
+                let thread_counter = Arc::clone(&thread_counter);
+                let shreds_to_ignore_thread = Arc::clone(&shreds_to_ignore);
+                let shreds_to_ignore_main = Arc::clone(&shreds_to_ignore);
+
                 let handle = thread::spawn(move || {
-                    decode_payload(shreds_clone);
+                    match decode_payload(shreds_clone) {
+                        Ok(_entries) => {
+                            if let Ok(mut ignore_list) = shreds_to_ignore_thread.lock() {
+                                ignore_list.push((shred_clone.slot(), shred_clone.fec_set_index()));
+                                println!("Added to shreds_to_ignore (async thread): {:?}", (shred_clone.slot(), shred_clone.fec_set_index()));
+                            }
+                        },
+                        Err(error) => {
+                            println!("Error during shred recovery: {:?}", error);
+                        }
+                    }
                     
                     // Decrement thread counter when done
                     let mut count = thread_counter.lock().unwrap();
@@ -124,7 +158,10 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                 });
 
                 // Add the processed slot/fec_set to ignore list
-                shreds_to_ignore.push((shred.slot(), shred.fec_set_index()));
+                if let Ok(mut ignore_list) = shreds_to_ignore_main.lock() {
+                    ignore_list.push((shred.slot(), shred.fec_set_index()));
+                    println!("Added to shreds_to_ignore (main): {:?}", (shred.slot(), shred.fec_set_index()));
+                }
                 println!("----------------------------------------");
                 break; // Exit the loop after spawning the thread
             }
@@ -132,9 +169,10 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
     }
 }
 
-fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
+fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
     // Check if any transaction contains a Pumpfun instruction
-    let contains_pumpfun = entries.iter().any(|entry| {
+    let entries_cloned = entries.clone();
+    let contains_pumpfun = entries_cloned.iter().any(|entry| {
         entry.transactions.iter().any(|transaction| {
             transaction.message.static_account_keys().contains(&Pubkey::from_str(PUMPFUN_PROGRAM_ID).unwrap())
         })
@@ -144,44 +182,13 @@ fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
 
     let instructions = ["buy", "sell", "create", "setparams", "initialize", "withdraw"];
 
-    // entries
-    // .iter()
-    // .filter(|entry| !entry.is_tick())
-    // .cloned()
-    // .flat_map(|entry| entry.transactions)
-    // .map(|transaction| {
-    //     let mut pre_balances: Vec<u64> = vec![];
-    //     let mut post_balances: Vec<u64> = vec![];
-    //     for i in 0..transaction.message.static_account_keys().len() {
-    //         pre_balances.push(i as u64 * 10);
-    //         post_balances.push(i as u64 * 11);
-    //     }
-    //     let compute_units_consumed = Some(12345);
-    //     let signature = transaction.signatures[0];
-    //     let status = TransactionStatusMeta {
-    //         status: Ok(()),
-    //         fee: 42,
-    //         pre_balances: pre_balances.clone(),
-    //         post_balances: post_balances.clone(),
-    //         inner_instructions: Some(vec![]),
-    //         log_messages: Some(vec![]),
-    //         pre_token_balances: Some(vec![]),
-    //         post_token_balances: Some(vec![]),
-    //         rewards: Some(vec![]),
-    //         loaded_addresses: LoadedAddresses::default(),
-    //         return_data: Some(TransactionReturnData::default()),
-    //         compute_units_consumed,
-    //     })
-
     if contains_pumpfun {
-        for entry in entries {
+        for entry in entries_cloned {
             for transaction in entry.transactions {
                 let signature = transaction.signatures[0];
-                // if transaction.message.static_account_keys().contains(&Pubkey::from_str(PUMPFUN_PROGRAM_ID).unwrap()) {
                 for instruction in transaction.message.instructions() {
                     let program_id_index = instruction.program_id_index as usize;
                     if program_id_index >= transaction.message.static_account_keys().len() {
-                        //println!("Skipping::{}", bs58::encode(tx_event.transaction.clone().unwrap().signatures[0].clone()).into_string());
                         continue;
                     }
                     let program_id = transaction.message.static_account_keys()[program_id_index];
@@ -197,9 +204,7 @@ fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
                         println!("Pumpfun idle instruction {:?}", idl_instruction.unwrap());
                         
                         println!("Pumpfun instruction found");
-                        // println!("Instruction account keys: {:?}", instruction.accounts);
                         println!("Transaction signature: {:?}", signature);
-                        // println!("Current transaction account keys: {:?}", transaction.message.static_account_keys());
                         println!("{}", program_id.to_string());
                         
                         match idl_instruction {
@@ -211,12 +216,6 @@ fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
                             Some(&"create") => {
                                 match <(String, String, String)>::try_from_slice(&instruction.data[8..]) {
                                     Ok(data) => {
-                                        // let decoded = PFCreateInstruction {
-                                        //     name: data.0,
-                                        //     symbol: data.1,
-                                        //     uri: data.2,
-                                        //     mint: Pubkey::from_str("sss").unwrap(),
-                                        // };
                                         let now = Utc::now();
                                         let mut file = OpenOptions::new()
                                             .append(true)
@@ -226,10 +225,7 @@ fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
                                             now.format("%Y-%m-%d %H:%M:%S%.3f"),
                                             data.0,
                                             slot,
-                                            // data.1,
-                                            // data.2,
                                             signature,
-                                            
                                         );
                                         println!("Pumpfun Create instruction: {}, {}, {}, {}",
                                             now.format("%Y-%m-%d %H:%M:%S%.3f"),
@@ -237,27 +233,14 @@ fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
                                             data.1,
                                             data.2
                                         );
-                                        // DecodedInstruction::PFCreate(decoded);
                                     }
-                                    Err(e) => {
-                                        // Return an error instead of unit `()`
-                                        // Err(Box::new(e));
-                                    }
+                                    Err(_) => {}
                                 }
                             }
                             _ => {
                                 println!("Pumpfun instruction not found");
                             }
                         }
-
-                        
-                        // Write lamports in a file
-                        // let mut file_lamports = OpenOptions::new()
-                        //     .create(true)
-                        //     .append(true)
-                        //     .open("pumpfun_lamports.txt")
-                        //     .unwrap();
-                        // file_lamports.write_all(&lamports.to_le_bytes()).unwrap();
                     }
                 }
             }
@@ -265,8 +248,6 @@ fn pumpfun_decompile(entries: Vec<Entry>, slot: Slot ) {
     }
 }
 
-
-// Function to get the 8-byte discriminator from the instruction name
 fn get_discriminator(instruction_name: &str, param:Option<&str>) -> Vec<u8> {
     let mut hasher = Sha256::new();
     let input = match param {
@@ -276,4 +257,24 @@ fn get_discriminator(instruction_name: &str, param:Option<&str>) -> Vec<u8> {
     hasher.update(input);
     let hash = hasher.finalize();
     hash[..8].to_vec() // First 8 bytes of the SHA-256 hash as the discriminator
+}
+
+fn calculate_hashmap_size(hashmap: &HashMap<(u64, u32), Vec<Shred>>) -> usize {
+    let mut total_size = mem::size_of::<HashMap<(u64, u32), Vec<Shred>>>(); // HashMap overhead
+
+    for (key, value) in hashmap.iter() {
+        // Size of the key
+        total_size += mem::size_of_val(key);
+
+        // Size of the Vec metadata
+        total_size += mem::size_of_val(value);
+
+        // Dynamic allocation for the Vec<Shred>
+        for shred in value.iter() {
+            total_size += mem::size_of_val(shred); // Size of the Shred struct
+            total_size += shred.payload().capacity();  // Dynamic allocation for `Vec<u8>` inside `Shred`
+        }
+    }
+
+    total_size
 }

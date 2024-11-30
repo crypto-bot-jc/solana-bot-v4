@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap, net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket}, panic, sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, RwLock,
+        Arc, RwLock, Mutex,
     }, thread::{sleep, spawn, Builder, JoinHandle}, time::{Duration, SystemTime}
 };
 
@@ -101,7 +101,7 @@ pub fn start_forwarder_threads(
 
     let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
     let mut total_shred_received_count = 0;
-    let mut shreds_to_ignore: Vec<(u64, u32)> = Vec::new();
+    let shreds_to_ignore = Arc::new(Mutex::new(Vec::new()));
     
     // Create single processing thread
     let process_thread = Builder::new()
@@ -114,7 +114,7 @@ pub fn start_forwarder_threads(
                         let res = recv_from_channel_and_analyse_shred(
                             maybe_packet_batch,
                             &mut shred_map,
-                            &mut shreds_to_ignore,
+                            Arc::clone(&shreds_to_ignore),
                             &mut total_shred_received_count
                         );
                     }
@@ -584,4 +584,3 @@ mod tests {
         );
     }
 }
-
