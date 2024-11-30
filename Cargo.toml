@@ -20,6 +20,7 @@ lto = "thin"
 
 [workspace.dependencies]
 arc-swap = "1.6"
+bot = { path = "bot" }
 clap = { version = "4", features = ["derive", "env"] }
 crossbeam-channel = "0.5.8"
 dashmap = "5"
@@ -48,3 +49,4 @@ tonic = { version = "0.10", features = ["tls", "tls-roots", "tls-webpki-roots"] 
 tonic-build = "0.10"
 solana-ledger = { path = "solana-ledger" }
 spl-associated-token-account = "2.3.0"
+sha2 = "0.10.8"

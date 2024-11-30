@@ -74,7 +74,6 @@ pub fn start_forwarder_threads(
         .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).max(4));
 
     let recycler: PacketBatchRecycler = Recycler::warmed(100, 1024);
-
     // spawn a thread for each listen socket. linux kernel will load balance amongst shared sockets
     solana_net_utils::multi_bind_in_range(src_addr, (src_port, src_port + 1), num_threads)
         .unwrap_or_else(|_| {
@@ -111,11 +110,9 @@ pub fn start_forwarder_threads(
             let shutdown_receiver = shutdown_receiver.clone();
             let exit = exit.clone();
 
-
-
-            let mut shreds_received = Shredsreceived::new();
-            let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
             println!("Thread ID: {}", thread_id);
+            let mut shred_map: HashMap<(u64, u32), Vec<Shred>> = HashMap::new();
+            let mut total_shred_received_count = 0;
             let send_thread = Builder::new()
                 .name(format!("ssPxyTx_{thread_id}"))
                 .spawn(move || {
@@ -126,7 +123,8 @@ pub fn start_forwarder_threads(
                             recv(packet_receiver) -> maybe_packet_batch => {
                                let res = recv_from_channel_and_analyse_shred(
                                     maybe_packet_batch,
-                                    &mut shred_map
+                                    &mut shred_map,
+                                    &mut total_shred_received_count
                                );
                             }
                             // handle shutdown (avoid using sleep since it will hang under SIGINT)
