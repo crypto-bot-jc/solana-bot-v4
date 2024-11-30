@@ -978,9 +978,11 @@ pub fn recover_public(
         .shred_variant
     {
         ShredVariant::LegacyData | ShredVariant::LegacyCode => {
+            println!("Recover public: Shred variant is legacy");
             Shredder::try_recovery(shreds, reed_solomon_cache)
         }
         ShredVariant::MerkleCode { .. } | ShredVariant::MerkleData { .. } => {
+            println!("Recover public: Shred variant is merkle");
             let shreds = shreds
                 .into_iter()
                 .map(merkle::Shred::try_from)
@@ -997,6 +999,7 @@ pub(crate) fn recover(
     shreds: Vec<Shred>,
     reed_solomon_cache: &ReedSolomonCache,
 ) -> Result<Vec<Shred>, Error> {
+    println!("Recover: Recovering shreds");
     match shreds
         .first()
         .ok_or(TooFewShardsPresent)?

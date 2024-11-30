@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::OpenOptions, io::Write, str::FromStr};
+use std::{collections::HashMap, fs::OpenOptions, io::Write, str::FromStr, time::Instant};
 use sha2::{Digest, Sha256};
 
 use solana_entry::entry::Entry;
@@ -28,7 +28,7 @@ pub fn recv_from_channel_and_analyse_shred(
         let _result: Result<Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
         match _result {
             Ok(shred) => {
-                println!("Total shred received: {:?} - {:?} - {:?}", total_shred_received_count, shred.slot(), shred.fec_set_index());
+                // println!("Total shred received: {:?} - {:?} - {:?}", total_shred_received_count, shred.slot(), shred.fec_set_index());
                 if shreds_to_ignore.contains(&(shred.slot(), shred.fec_set_index())) {
                     continue;
                 }
@@ -42,14 +42,24 @@ pub fn recv_from_channel_and_analyse_shred(
 }
 
 fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<Shred>>, shreds_to_ignore: &mut Vec<(u64, u32)>) { // -> Option<Vec<u8>> {
+    // Only add non-duplicate shreds to the map
+    
     shred_map.entry((shred.slot(), shred.fec_set_index())).or_insert_with(Vec::new).push(shred.clone());
+    match shred_map.get(&(shred.slot(), shred.fec_set_index())) {
+        Some(shreds) => {
+            shreds.iter().find(|s| s.index() == shred.index() && s.is_code() == shred.is_data()).unwrap();
+        },
+        None => {
+            println!("Shred map length: None");
+        }
+    } 
 
     if let Some(mut shreds) = shred_map.get(&(shred.slot(), shred.fec_set_index())) {
         for _shred in shreds { //Iterate over all shreds in the slot, because we need to check if any of the shreds is complete and last in slot
-            // current shred is the last shred in the slot and shred count is higer then 66% of 64 (total shred in a shred family)
-            if _shred.data_complete() && _shred.last_in_slot() && shreds.len() > 43 {
+            if _shred.data_complete() && shreds.len() > 43 {
                 println!("----------------------------------------");
                 println!("Found completed FEC set for slot: {:?} FEC index {:?}", shred.slot(), shred.fec_set_index());
+                println!("Completed shred properties: data_complete {:?}, last_in_slot {:?}", _shred.data_complete(), _shred.last_in_slot());
                 // println!("Supposed Data shreds: {:?}", solana_ledger::shred::Shredder::get_num_data_shred(shreds.clone()));
                 // println!("Supposed Code shreds: {:?}", solana_ledger::shred::Shredder::get_num_code_shred(shreds.clone()));
                 
@@ -59,10 +69,13 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                     .open("log.log")
                     .expect("Unable to open log file");
 
+                let start_time = Instant::now();
+
                 // let something: Result<Vec<Shred>, solana_ledger::shred::Error> = solana_ledger::shred::Shredder::try_recovery(shred_ordered_by_index, &ReedSolomonCache::default());
                 println!("Pre-recovery shred count: {:?}", shreds.len());
                 // println!("Copium: {:?}", copium.unwrap().len());
                 let recovered_shreds = solana_ledger::shred::recover_public((shreds).to_vec(), &ReedSolomonCache::default());
+                println!("Recovered (success or fail) shreds length");
                 match recovered_shreds {
                     Ok(mut _shreds) => {
                         println!("Recovered shreds length solomon-reed: {:?}", _shreds.len());
@@ -89,7 +102,11 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                         println!("Deshred payload length: {:?}", deshred_payload.len());
                         let deshred_entries: Vec<Entry> = bincode::deserialize(&deshred_payload).unwrap();
                         println!("Deshred entries length: {:?}", deshred_entries.len());
-                        println!("Hash map keys: {:?}", shred_map.keys());
+
+                        let elapsed_time = start_time.elapsed();
+                        println!("Time taken for successful shred processing: {:?}", elapsed_time);
+
+                        // println!("Hash map keys: {:?}", shred_map.keys());
                         shreds_to_ignore.push((shred.slot(), shred.fec_set_index()));
                         // println!("Deshred entries: {:?}", deshred_entries);
                         // println!("Entries: {:?}", deshred_entries);
@@ -119,6 +136,8 @@ fn decode_shred_payload(shred: &Shred, shred_map: &mut HashMap<(u64, u32), Vec<S
                         }
                     }
                     Err(error) => {
+                        let elapsed_time = start_time.elapsed();
+                        println!("Time taken for failed recovery: {:?}", elapsed_time);
                         println!("Error during recovery: {:?}", error);
                     }
                 }
@@ -139,4 +158,3 @@ fn get_discriminator(instruction_name: &str, param:Option<&str>) -> Vec<u8> {
     let hash = hasher.finalize();
     hash[..8].to_vec() // First 8 bytes of the SHA-256 hash as the discriminator
 }
-

@@ -331,6 +331,15 @@ impl Shredder {
         shreds: Vec<Shred>,
         reed_solomon_cache: &ReedSolomonCache,
     ) -> Result<Vec<Shred>, Error> {
+        // Custom code
+        println!("Try recovery: Started try recovery");
+        match shreds.first() {
+            None => {
+                println!("Try recovery: error too few shards present - Challenge 1");
+            },
+            Some(shred) => {}
+        };
+        // End custom code
         let (slot, fec_set_index) = match shreds.first() {
             None => return Err(Error::from(TooFewShardsPresent)),
             Some(shred) => (shred.slot(), shred.fec_set_index()),
@@ -392,6 +401,12 @@ impl Shredder {
 
     /// Combines all shreds to recreate the original buffer
     pub fn deshred(shreds: &[Shred]) -> Result<Vec<u8>, Error> {
+        match shreds.first() {
+            None => {
+                println!("Deshred: error too few shards present - Challenge 1");
+            }
+            Some(shred) => {}
+        }
         let index = shreds.first().ok_or(TooFewDataShards)?.index();
         let aligned = shreds.iter().zip(index..).all(|(s, i)| s.index() == i);
         let data_complete = {
@@ -399,6 +414,7 @@ impl Shredder {
             shred.data_complete() || shred.last_in_slot()
         };
         if !data_complete || !aligned {
+            println!("Deshred: Data not complete: {:?}, aligned: {:?}", data_complete, aligned);
             return Err(Error::from(TooFewDataShards));
         }
         let data: Vec<_> = shreds.iter().map(Shred::data).collect::<Result<_, _>>()?;
