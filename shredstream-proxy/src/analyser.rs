@@ -74,13 +74,13 @@ pub fn recv_from_channel_and_analyse_shred(
         match _result {
             Ok(shred) => {
                 let now = Utc::now();
-                // let mut file = OpenOptions::new()
-                //     .append(true)
-                //     .create(true)
-                //     .open("shreds.txt");
-                // writeln!(file.unwrap(), "Total shred received: {}, {:?} - {:?} - {:?}",
-                //     now.format("%Y-%m-%d %H:%M:%S%.3f"), total_shred_received_count, shred.slot(), shred.fec_set_index()
-                // );
+                let mut file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open("shreds.txt");
+                writeln!(file.unwrap(), "Total shred received: {}, {:?} - {:?} - {:?}",
+                    now.format("%Y-%m-%d %H:%M:%S%.3f"), total_shred_received_count, shred.slot(), shred.fec_set_index()
+                );
 
                 let should_ignore = {
                     if let Ok(ignore_list) = shreds_to_ignore.lock() {

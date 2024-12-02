@@ -27,7 +27,11 @@ use thiserror::Error;
 use tokio::runtime::Runtime;
 use tonic::Status;
 
-use crate::{forwarder::ShredMetrics, token_authenticator::BlockEngineConnectionError, logger::LogMode};
+use crate::{
+    forwarder::{ShredMetrics, start_destination_refresh_thread},
+    token_authenticator::BlockEngineConnectionError,
+    logger::LogMode,
+};
 
 pub mod analyser;
 pub mod forwarder;
@@ -152,7 +156,7 @@ pub enum ShredstreamProxyError {
     Shutdown,
 }
 
-fn resolve_hostname_port(hostname_port: &str) -> io::Result<(SocketAddr, String)> {
+pub fn resolve_hostname_port(hostname_port: &str) -> io::Result<(SocketAddr, String)> {
     let socketaddr = hostname_port.to_socket_addrs()?.next().ok_or_else(|| {
         Error::new(
             ErrorKind::AddrNotAvailable,
@@ -232,9 +236,19 @@ fn main() -> Result<(), ShredstreamProxyError> {
     let runtime = Runtime::new()?;
     let (grpc_restart_signal_s, grpc_restart_signal_r) = crossbeam_channel::bounded(1);
     let mut thread_handles = vec![];
-    if let ProxySubcommands::Shredstream(args) = shredstream_args {
+
+    // Initialize shared state
+    let deduper = Arc::new(RwLock::new(Deduper::<2, [u8]>::new(
+        &mut rand::thread_rng(),
+        forwarder::DEDUPER_NUM_BITS,
+    )));
+    let metrics = Arc::new(ShredMetrics::new());
+    let unioned_dest_sockets = Arc::new(ArcSwap::new(Arc::new(vec![])));
+
+    // Start heartbeat if in Shredstream mode
+    if let ProxySubcommands::Shredstream(shred_args) = shredstream_args {
         let heartbeat_hdl = start_heartbeat(
-            args,
+            shred_args,
             &exit,
             &shutdown_receiver,
             runtime,
@@ -243,23 +257,22 @@ fn main() -> Result<(), ShredstreamProxyError> {
         thread_handles.push(heartbeat_hdl);
     }
 
-    // share deduper + metrics between forwarder <-> accessory thread
-    // use mutex since metrics are write heavy. cheaper than rwlock
-    let deduper = Arc::new(RwLock::new(Deduper::<2, [u8]>::new(
-        &mut rand::thread_rng(),
-        forwarder::DEDUPER_NUM_BITS,
-    )));
-
+    // Start forwarder threads
     let forwarder_hdls = forwarder::start_forwarder_threads(
+        unioned_dest_sockets.clone(),
         args.src_bind_addr,
         args.src_bind_port,
         args.num_threads,
+        deduper.clone(),
+        metrics.clone(),
+        true,
+        args.debug_trace_shred,
         shutdown_receiver.clone(),
         exit.clone(),
     );
+    thread_handles.extend(forwarder_hdls);
 
-    let metrics = Arc::new(ShredMetrics::new());
-
+    // Start metrics thread
     let metrics_hdl = forwarder::start_forwarder_accessory_thread(
         deduper,
         metrics.clone(),
@@ -307,17 +320,23 @@ fn start_heartbeat(
         }),
     );
 
+    let socket_addr = SocketAddr::new(
+        args.common_args
+            .public_ip
+            .unwrap_or_else(|| get_public_ip().unwrap()),
+        args.common_args.src_bind_port,
+    );
+
+    let block_engine_url = args.block_engine_url.clone();
+    let auth_url = args.auth_url.unwrap_or(args.block_engine_url);
+    let desired_regions = args.desired_regions;
+
     heartbeat::heartbeat_loop_thread(
-        args.block_engine_url.clone(),
-        args.auth_url.unwrap_or(args.block_engine_url),
+        block_engine_url,
+        auth_url,
         auth_keypair,
-        args.desired_regions,
-        SocketAddr::new(
-            args.common_args
-                .public_ip
-                .unwrap_or_else(|| get_public_ip().unwrap()),
-            args.common_args.src_bind_port,
-        ),
+        desired_regions,
+        socket_addr,
         runtime,
         "shredstream_proxy".to_string(),
         grpc_restart_signal_r,

@@ -54,82 +54,134 @@ impl Shredsreceived {
     }
 }
 
-/// Bind to port and start forwarding shreds using a single connection
+/// Bind to ports and start forwarding shreds using multiple threads
 #[allow(clippy::too_many_arguments)]
 pub fn start_forwarder_threads(
+    unioned_dest_sockets: Arc<ArcSwap<Vec<SocketAddr>>>,
     src_addr: IpAddr,
     src_port: u16,
     num_threads: Option<usize>,
+    deduper: Arc<RwLock<Deduper<2, [u8]>>>,
+    metrics: Arc<ShredMetrics>,
+    use_discovery_service: bool,
+    debug_trace_shred: bool,
     shutdown_receiver: Receiver<()>,
     exit: Arc<AtomicBool>,
 ) -> Vec<JoinHandle<()>> {
+    let num_threads = num_threads
+        .unwrap_or_else(|| usize::from(std::thread::available_parallelism().unwrap()).max(4));
+
     let recycler: PacketBatchRecycler = Recycler::warmed(100, 1024);
-    
-    // Create a single socket connection
-    let incoming_shred_socket = UdpSocket::bind(SocketAddr::new(src_addr, src_port))
+
+    // Shared state for shred analysis
+    let shred_map: Arc<Mutex<HashMap<(u64, u32), ShredEntry>>> = Arc::new(Mutex::new(HashMap::new()));
+    let shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+    let total_shred_received_count = Arc::new(Mutex::new(0u64));
+
+    // spawn a thread for each listen socket. linux kernel will load balance amongst shared sockets
+    solana_net_utils::multi_bind_in_range(src_addr, (src_port, src_port + 1), num_threads)
         .unwrap_or_else(|_| {
-            panic!("Failed to bind listener socket. Check that port {src_port} is not in use.")
-        });
-
-    let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
-    let stats = Arc::new(StreamerReceiveStats::new("shredstream_proxy-listen_thread"));
-    
-    // Create single listen thread
-    let listen_thread = streamer::receiver(
-        Arc::new(incoming_shred_socket),
-        exit.clone(),
-        packet_sender,
-        recycler.clone(),
-        stats.clone(),
-        Duration::default(),
-        false,
-        Some(Arc::new(AtomicBool::new(false))),
-        false,
-    );
-
-    let report_metrics_thread = {
-        let exit = exit.clone();
-        spawn(move || {
-            while !exit.load(Ordering::Relaxed) {
-                sleep(Duration::from_secs(1));
-                stats.report();
-            }
+            panic!("Failed to bind listener sockets. Check that port {src_port} is not in use.")
         })
-    };
+        .1
+        .into_iter()
+        .enumerate()
+        .flat_map(|(thread_id, incoming_shred_socket)| {
+            let (packet_sender, packet_receiver) = crossbeam_channel::unbounded();
+            let stats = Arc::new(StreamerReceiveStats::new("shredstream_proxy-listen_thread"));
+            
+            // Listen thread - receives packets from the network
+            let socket = Arc::new(incoming_shred_socket);
+            let exit_receiver = Arc::clone(&exit);
+            let listen_thread = streamer::receiver(
+                socket,
+                exit_receiver,
+                packet_sender,
+                recycler.clone(),
+                stats.clone(),
+                Duration::default(),
+                false,
+                None,
+                false,
+            );
 
-    let shutdown_receiver = shutdown_receiver.clone();
-    let exit = exit.clone();
+            // Metrics reporting thread
+            let report_metrics_thread = {
+                let exit = Arc::clone(&exit);
+                let stats = stats.clone();
+                Builder::new()
+                    .name(format!("ssMetrics{thread_id}"))
+                    .spawn(move || {
+                        while !exit.load(Ordering::Relaxed) {
+                            sleep(Duration::from_secs(1));
+                            stats.report();
+                        }
+                    })
+                    .unwrap()
+            };
 
-    let shred_map = Arc::new(Mutex::new(HashMap::new()));
-    let mut total_shred_received_count = 0;
-    let shreds_to_ignore = Arc::new(Mutex::new(Vec::new()));
-    
-    // Create single processing thread
-    let process_thread = Builder::new()
-        .name("ssPxyTx_main".to_string())
-        .spawn(move || {
-            while !exit.load(Ordering::Relaxed) {
-                crossbeam_channel::select! {
-                    // forward packets
-                    recv(packet_receiver) -> maybe_packet_batch => {
-                        let res = recv_from_channel_and_analyse_shred(
-                            maybe_packet_batch,
-                            Arc::clone(&shred_map),
-                            Arc::clone(&shreds_to_ignore),
-                            &mut total_shred_received_count
-                        );
+            let shred_map = Arc::clone(&shred_map);
+            let shreds_to_ignore = Arc::clone(&shreds_to_ignore);
+            let total_shred_received_count = Arc::clone(&total_shred_received_count);
+            let shutdown_receiver = shutdown_receiver.clone();
+            let exit = Arc::clone(&exit);
+            let metrics = Arc::clone(&metrics);
+            let deduper = Arc::clone(&deduper);
+            let unioned_dest_sockets = Arc::clone(&unioned_dest_sockets);
+
+            // Processing thread - analyzes shreds
+            let process_thread = Builder::new()
+                .name(format!("ssPxyTx_{thread_id}"))
+                .spawn(move || {
+                    let send_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+                        .expect("to bind to udp port for forwarding");
+                    let mut local_dest_sockets = unioned_dest_sockets.load();
+
+                    let refresh_subscribers_tick = if use_discovery_service {
+                        crossbeam_channel::tick(Duration::from_secs(30))
+                    } else {
+                        crossbeam_channel::tick(Duration::MAX)
+                    };
+
+                    while !exit.load(Ordering::Relaxed) {
+                        crossbeam_channel::select! {
+                            // Process incoming packets
+                            recv(packet_receiver) -> maybe_packet_batch => {
+                                let mut count = total_shred_received_count.lock().unwrap();
+                                recv_from_channel_and_analyse_shred(
+                                    maybe_packet_batch.clone(),
+                                    Arc::clone(&shred_map),
+                                    Arc::clone(&shreds_to_ignore),
+                                    &mut count,
+                                );
+
+                                // Forward packets to destinations
+                                let _ = recv_from_channel_and_send_multiple_dest(
+                                    maybe_packet_batch,
+                                    &deduper,
+                                    &send_socket,
+                                    &local_dest_sockets,
+                                    debug_trace_shred,
+                                    &metrics,
+                                );
+                            }
+                            // Refresh thread-local subscribers
+                            recv(refresh_subscribers_tick) -> _ => {
+                                local_dest_sockets = unioned_dest_sockets.load();
+                            }
+                            // Handle shutdown
+                            recv(shutdown_receiver) -> _ => {
+                                break;
+                            }
+                        }
                     }
-                    // handle shutdown
-                    recv(shutdown_receiver) -> _ => {
-                        break;
-                    }
-                }
-            }
-            info!("Exiting forwarder thread.");
+                    info!("Exiting processor thread {thread_id}.");
+                })
+                .unwrap();
+
+            [listen_thread, process_thread, report_metrics_thread]
         })
-        .unwrap();
-
-    vec![listen_thread, process_thread, report_metrics_thread]
+        .collect::<Vec<JoinHandle<()>>>()
 }
 
 /// Broadcasts same packet to multiple recipients
