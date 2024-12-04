@@ -2,10 +2,6 @@ use std::net::{UdpSocket, SocketAddr};
 use std::time::Duration;
 
 
-pub mod shred {
-    include!("../src/shared.rs");
-}
-
 fn main() -> std::io::Result<()> {
     let address: SocketAddr = "127.0.0.1:2002".parse().unwrap();
     let socket = UdpSocket::bind(address)?;
@@ -21,9 +17,6 @@ fn main() -> std::io::Result<()> {
                 println!("Received {} bytes from {}: {:?}", amt, src, &buf[..amt]);
             }
 
-            shred::Header::decode(&mut buf) => {
-                println!("Received header: {:?}", header);
-            }
 
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // No data available yet
