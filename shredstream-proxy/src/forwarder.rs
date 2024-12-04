@@ -195,14 +195,14 @@ fn recv_from_channel_and_send_multiple_dest(
     metrics: &ShredMetrics,
 ) -> Result<(), ShredstreamProxyError> {
     let packet_batch = maybe_packet_batch.map_err(ShredstreamProxyError::RecvError)?;
-    log_info!(LOG_FILE, "PacketBatch contains {} packets", packet_batch.len());
+    //log_info!(LOG_FILE, "PacketBatch contains {} packets", packet_batch.len());
 
     for (i, packet) in packet_batch.iter().enumerate() {
-        log_info!(LOG_FILE, "\nDecoding packet {}:", i);
-        log_info!(LOG_FILE, "  Meta: {:?}", packet.meta());
-        log_info!(LOG_FILE, "  Size: {}", packet.meta().size);
-        log_info!(LOG_FILE, "  Size: {:?}", packet.meta().flags);
-        log_info!(LOG_FILE, "PACKET : {:?}", packet);
+        // log_info!(LOG_FILE, "\nDecoding packet {}:", i);
+        // log_info!(LOG_FILE, "  Meta: {:?}", packet.meta());
+        // log_info!(LOG_FILE, "  Size: {}", packet.meta().size);
+        // log_info!(LOG_FILE, "  Size: {:?}", packet.meta().flags);
+        // log_info!(LOG_FILE, "PACKET : {:?}", packet);
         
         let _result: Result<solana_ledger::shred::Shred, solana_ledger::shred::Error> = 
             Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec());

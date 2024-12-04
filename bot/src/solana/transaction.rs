@@ -30,7 +30,7 @@ use rusqlite::{Connection, params, Result};
 use log::{error};
 use hex_literal::hex;
 use crate::solana::address_table_cache::{AddressTableCache};
-
+use std::process;
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PFInitializeInstruction;
 
@@ -1186,8 +1186,8 @@ pub async fn buy(amount_f:f64, max_sol_cost_f:f64, mint:&str, decimal:u32, inclu
 
     let res = send_transaction_to_jito(&base58_tx).await?;
 
-    println!("{:?}",res);
-
+    println!("Sent TX result: {:?}",res);
+    process::exit(0);
     Ok(())
 }
 

@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use num_cpus;
 use borsh::{BorshDeserialize};
 
+use std::process;
+use tokio;
+
 use solana_entry::entry::Entry;
 use solana_ledger::{blockstore_db::columns::TransactionStatus, shred::{ReedSolomonCache, Shred, Shredder}};
 use solana_perf::packet::PacketBatch;
@@ -295,6 +298,7 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                         log_info!(LOG_FILE, "Pumpfun instruction found");
                         log_info!(LOG_FILE, "Transaction signature: {:?}", signature);
                         log_info!(LOG_FILE, "{}", program_id.to_string());
+      
                         
                         match idl_instruction {
                             Some(&"buy") => {
@@ -324,6 +328,20 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                                             data.2,
                                             transaction.message.static_account_keys()[instruction.accounts[0] as usize]
                                         );
+
+
+                                      //  let mint = transaction.message.static_account_keys()[1].to_string();
+                                       // let mint_str: &str = &mint;
+
+                                    //    bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true);
+
+                                        //let test3 =  bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true).await();
+
+                                       // tokio::runtime::Runtime::new().unwrap().block_on(bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true));
+
+                                    // println!("WTF {:?}", transaction.message.static_account_keys()[1]);
+                                        
+
                                     }
                                     Err(_) => {}
                                 }
