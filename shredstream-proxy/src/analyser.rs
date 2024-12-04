@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use num_cpus;
 use borsh::{BorshDeserialize};
 
+use gethostname::gethostname;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use std::process;
 use tokio;
 
@@ -285,6 +288,10 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                         continue;
                     }
                     let program_id = transaction.message.static_account_keys()[program_id_index];
+                    let start = SystemTime::now();
+                    let since_the_epoch = start
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards");
 
                     
                     if program_id.to_string() == PUMPFUN_PROGRAM_ID {
@@ -314,7 +321,9 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                                             .append(true)
                                             .create(true)
                                             .open("pumpfun_token_creation.txt");
-                                        writeln!(file.unwrap(), "Pumpfun Create instruction: {}, {}, {}, {}, {}",
+                                        writeln!(file.unwrap(), "{}, {}, {}, {}, {}, {}, {}",
+                                            gethostname().into_string().unwrap(),
+                                            since_the_epoch.as_millis().to_string(),
                                             now.format("%Y-%m-%d %H:%M:%S%.3f"),
                                             data.0,
                                             slot,
