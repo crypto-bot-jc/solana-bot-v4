@@ -344,7 +344,7 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                                         // bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true, transaction.message.recent_blockhash());
 
                                         // let test3 =  bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true).await();
-                                        log_info!("Recent blockhash: {:?}", transaction.message.recent_blockhash());
+                                        //log_info!("Recent blockhash: {:?}", transaction.message.recent_blockhash());
 
                                         tokio::runtime::Runtime::new().unwrap().block_on(bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true, Some(transaction.message.recent_blockhash())));
 
