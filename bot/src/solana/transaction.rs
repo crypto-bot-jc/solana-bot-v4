@@ -175,7 +175,7 @@ struct TipAccountResponse {
 }
 
 // JitoRPC Endpoint
-const JITO_RPC_ENDPOINT: &str = "https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions";
+const JITO_RPC_ENDPOINT: &str = "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions";
 
 const PUMPFUN_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
