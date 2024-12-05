@@ -210,6 +210,20 @@ fn main() -> Result<(), ShredstreamProxyError> {
     logger::set_log_mode(all_args.log_mode.into());
 
     let shredstream_args = all_args.shredstream_args.clone();
+
+    // Print out the desired_region and block_engine_url
+    match &shredstream_args {
+        ProxySubcommands::Shredstream(args) => {
+            println!(
+                "Starting Shredstream with desired regions: {} and block engine url: {}",
+                args.desired_regions.join(", "),
+                args.block_engine_url
+            );
+        }
+        ProxySubcommands::ForwardOnly(_) => {
+            println!("Starting Shredstream in forward-only mode");
+        }
+    }
     // common args
     let args = match all_args.shredstream_args {
         ProxySubcommands::Shredstream(x) => x.common_args,

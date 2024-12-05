@@ -1100,16 +1100,21 @@ pub async fn transfer_sol(amount_f: f64, target: &str) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-pub async fn buy(amount_f:f64, max_sol_cost_f:f64, mint:&str, decimal:u32, include_create:bool) -> Result<(), Box<dyn std::error::Error>>{
+pub async fn buy(amount_f:f64, max_sol_cost_f:f64, mint:&str, decimal:u32, include_create:bool, recent_blockhash: Option<&Hash>) -> Result<(), Box<dyn std::error::Error>>{
     dotenv().ok();
 
     let amount = (amount_f * 10_u64.pow(decimal) as f64) as u64;
     let max_sol_cost = (max_sol_cost_f * 10_u64.pow(9) as f64) as u64;
-    // Create an RPC client to fetch the recent blockhash
-    let client = RpcClient::new("https://api.mainnet-beta.solana.com");
 
-    // Example: Fetch recent blockhash
-    let recent_blockhash = client.get_latest_blockhash()?;
+    if recent_blockhash.is_none() {
+        // Create an RPC client to fetch the recent blockhash
+        let client = RpcClient::new("https://api.mainnet-beta.solana.com");
+
+        // Example: Fetch recent blockhash
+        let recent_blockhash = Some(client.get_latest_blockhash());
+    }
+
+    let recent_blockhash_value = recent_blockhash.unwrap();
 
     // Base58-encoded private key (replace with actual private key)
     let private_key_base58 = env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set in environment");
@@ -1175,7 +1180,7 @@ pub async fn buy(amount_f:f64, max_sol_cost_f:f64, mint:&str, decimal:u32, inclu
         instructions,
         &payer,                     // The payer of the transaction fees
         vec![&payer, &signer],      // List of signers
-        recent_blockhash            // Recent blockhash
+        recent_blockhash_value.clone()            // Recent blockhash
     ).await?;
 
     // Serialize the transaction into raw bytes

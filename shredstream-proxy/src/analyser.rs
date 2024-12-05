@@ -339,16 +339,16 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                                         );
 
 
-                                      //  let mint = transaction.message.static_account_keys()[1].to_string();
-                                       // let mint_str: &str = &mint;
+                                        let mint = transaction.message.static_account_keys()[1].to_string();
+                                        let mint_str: &str = &mint;
+                                        // bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true, transaction.message.recent_blockhash());
 
-                                    //    bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true);
+                                        // let test3 =  bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true).await();
+                                        log_info!("Recent blockhash: {:?}", transaction.message.recent_blockhash());
 
-                                        //let test3 =  bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true).await();
+                                        tokio::runtime::Runtime::new().unwrap().block_on(bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true, Some(transaction.message.recent_blockhash())));
 
-                                       // tokio::runtime::Runtime::new().unwrap().block_on(bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true));
-
-                                    // println!("WTF {:?}", transaction.message.static_account_keys()[1]);
+                                        println!("WTF {:?}", transaction.message.static_account_keys()[1]);
                                         
 
                                     }
