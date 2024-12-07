@@ -24,6 +24,7 @@ use solana_perf::deduper::Deduper;
 use solana_sdk::signature::read_keypair_file;
 use thiserror::Error;
 use tonic::Status;
+use tokio::runtime::Runtime;
 
 use crate::shredstream::{
     forwarder::{ShredMetrics, self},
@@ -134,6 +135,9 @@ fn shutdown_notifier(exit: Arc<AtomicBool>) -> io::Result<(Sender<()>, Receiver<
 }
 
 pub fn run_shredstream(config: ShredstreamConfig) -> Result<(), ShredstreamProxyError> {
+    // Create the runtime outside of any async context
+    let runtime = Runtime::new().expect("Failed to create Tokio runtime");
+    
     env_logger::builder().init();
 
     // Initialize logging
@@ -153,6 +157,7 @@ pub fn run_shredstream(config: ShredstreamConfig) -> Result<(), ShredstreamProxy
     let panic_hook = panic::take_hook();
     {
         let exit = exit.clone();
+        let shutdown_sender = shutdown_sender.clone();
         panic::set_hook(Box::new(move |panic_info| {
             exit.store(true, Ordering::SeqCst);
             let _ = shutdown_sender.send(());
@@ -218,6 +223,9 @@ pub fn run_shredstream(config: ShredstreamConfig) -> Result<(), ShredstreamProxy
     for thread in thread_handles {
         thread.join().expect("thread panicked");
     }
+
+    // Ensure runtime is dropped outside of any async context
+    drop(runtime);
 
     info!(
         "Exiting Shredstream, {} received , {} sent successfully, {} failed, {} duplicate shreds.",

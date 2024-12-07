@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(token.detect_tool_id, 1);
         
         // Clean up
-        fs::remove_file(db_path)?;
+        fs::remove_file(db_path).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         Ok(())
     }
 }
