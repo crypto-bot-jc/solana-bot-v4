@@ -4,7 +4,7 @@ members = [
     "solana-ledger",
     "shredstream-proxy", 
     "bot"
-]
+, "analytics"]
 resolver = "2"
 
 [workspace.package]

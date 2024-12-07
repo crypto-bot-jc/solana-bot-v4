@@ -7,6 +7,7 @@ target/
 /test-ledger/
 
 shred.key.json
+helius-api-key.txt
 
 **/*.rs.bk
 .cargo
