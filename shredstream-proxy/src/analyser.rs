@@ -77,17 +77,10 @@ pub fn recv_from_channel_and_analyse_shred(
     for (i, packet) in _packet_batch.iter().enumerate() {
         *total_shred_received_count += 1;
         let _result: Result<Shred, solana_ledger::shred::Error> =  Shred::new_from_serialized_shred(packet.data(..).unwrap().to_vec()); 
+        
         match _result {
             Ok(shred) => {
                 let now = Utc::now();
-                let mut file = OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open("shreds.txt");
-                writeln!(file.unwrap(), "Total shred received: {}, {:?} - {:?} - {:?}",
-                    now.format("%Y-%m-%d %H:%M:%S%.3f"), total_shred_received_count, shred.slot(), shred.fec_set_index()
-                );
-
                 let should_ignore = {
                     if let Ok(ignore_list) = shreds_to_ignore.lock() {
                         ignore_list.contains(&(shred.slot(), shred.fec_set_index()))
@@ -99,7 +92,9 @@ pub fn recv_from_channel_and_analyse_shred(
                 if should_ignore {
                     continue;
                 }
-                decode_shred_payload(&shred, Arc::clone(&shred_map), Arc::clone(&shreds_to_ignore));
+                let skip_buy = *total_shred_received_count < 10000;
+
+                decode_shred_payload(&shred, Arc::clone(&shred_map), Arc::clone(&shreds_to_ignore), skip_buy);
             },
             Err(error) => {
                 log_info!(LOG_FILE, "Error during shred serialization: {:?}", error);
@@ -108,7 +103,7 @@ pub fn recv_from_channel_and_analyse_shred(
     }
 }
 
-fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred::Error> {
+fn decode_payload(shreds: Vec<Shred>, skip_buy: bool) -> Result<Vec<Entry>, solana_ledger::shred::Error> {
     let recovered_shreds = solana_ledger::shred::recover_public((shreds).to_vec(), &ReedSolomonCache::default());
     let start_time = Instant::now();
     log_info!(LOG_FILE, "----------------------------------------");
@@ -141,6 +136,9 @@ fn decode_payload(shreds: Vec<Shred>) -> Result<Vec<Entry>, solana_ledger::shred
                     }        
                 }
             };
+            if skip_buy {
+                return Ok(deshred_entries);
+            }
             pumpfun_decompile(&deshred_entries, shreds.first().unwrap().slot());
             Ok(deshred_entries)
         },
@@ -157,6 +155,7 @@ fn decode_shred_payload(
     shred: &Shred,
     shred_map: Arc<Mutex<HashMap<(u64, u32), ShredEntry>>>,
     shreds_to_ignore: Arc<Mutex<Vec<(u64, u32)>>>,
+    skip_buy: bool,
 ) {
     let key = (shred.slot(), shred.fec_set_index());
     
@@ -192,7 +191,7 @@ fn decode_shred_payload(
 
             if current_threads >= num_cpus::get() {
                 // Too many threads, process synchronously
-                if let Ok(_entries) = decode_payload(shreds.clone()) {
+                if let Ok(_entries) = decode_payload(shreds.clone(), skip_buy) {
                     log_info!(LOG_FILE, "Processing time for slot {:?} FEC index {:?}: {}", 
                         shred.slot(), 
                         shred.fec_set_index(),
@@ -224,7 +223,7 @@ fn decode_shred_payload(
             let entry_clone = entry.clone();
 
             let handle = thread::spawn(move || {
-                match decode_payload(shreds.clone()) {
+                match decode_payload(shreds.clone(), skip_buy) {
                     Ok(_entries) => {
                         log_info!(LOG_FILE, "Processing time for slot {:?} FEC index {:?}: {}", 
                             shred_clone.slot(), 
@@ -346,7 +345,7 @@ fn pumpfun_decompile(entries: &Vec<Entry>, slot: Slot ) {
                                         // let test3 =  bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true).await();
                                         //log_info!("Recent blockhash: {:?}", transaction.message.recent_blockhash());
 
-                                        tokio::runtime::Runtime::new().unwrap().block_on(bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true, Some(transaction.message.recent_blockhash())));
+                                        // tokio::runtime::Runtime::new().unwrap().block_on(bot::solana::transaction::buy(0.0001, 0.000011, mint_str, 6, true, Some(transaction.message.recent_blockhash())));
 
                                         println!("WTF {:?}", transaction.message.static_account_keys()[1]);
                                         
