@@ -282,6 +282,164 @@ const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 //     message::TransactionEvent::decode(buffer)
 // }
 
+pub async fn send_transaction_to_helius(base58_str: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // Your Helius API key
+    const HELIUS_API_KEY: &str = "50d2f11a-972d-4918-9b20-3718333d437e";
+    
+    // Helius API URL
+    let helius_url = format!("https://staked.helius-rpc.com?api-key={}", HELIUS_API_KEY);
+
+    // Construct the request body
+    #[derive(Serialize)]
+    struct TransactionRequest {
+        transaction: String,
+        skip_preflight: bool,
+        preflight_commitment: String,
+    }
+
+    // Prepare the JSON payload
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendTransaction",
+        "params": [base58_str]
+    });
+
+    // Send the POST request to JitoRPC
+    let client = reqwest::Client::new();
+    let response = client.post(helius_url)
+        .json(&payload)
+        .send()
+        .await?;
+
+    println!("{:#?}", response);
+    // Parse the response
+    // if response.status().is_success() {
+    //     let json:serde_json::Value = response.json().await?;
+    //     println!("{:#?}", json);
+    //     if let Some(signature) = json.get("signature").and_then(|v| v.as_str()) {
+    //         Ok(signature.to_string())
+    //     } else {
+    //         Err("Unexpected response format: Missing 'signature'".into())
+    //     }
+    // } else {
+    //     let error_text = response.text().await?;
+    //     Err(format!("Failed to send transaction: {}", error_text).into())
+    // }
+
+    Ok("test".to_string())
+}
+
+
+pub async fn buy_helius(
+    amount_f: f64,
+    max_sol_cost_f: f64,
+    mint: &str,
+    decimal: u32,
+    include_create: bool,
+    recent_blockhash: Option<Hash>,
+) {
+    dotenv().ok();
+
+    let amount = (amount_f * 10_u64.pow(decimal) as f64) as u64;
+    let max_sol_cost = (max_sol_cost_f * 10_u64.pow(9) as f64) as u64;
+    // Create an RPC client to fetch the recent blockhash
+    let client = RpcClient::new("https://api.mainnet-beta.solana.com");
+
+    //let recent_blockhash_value = recent_blockhash.unwrap();
+
+    // Example: Fetch recent blockhash
+    let recent_blockhash2 = client.get_latest_blockhash().unwrap();
+
+    // Base58-encoded private key (replace with actual private key)
+    let private_key_base58 = env::var("PRIVATE_KEY").expect("PRIVATE_KEY not set in environment");
+    let jito_tip_amount_str = env::var("JITO_TIP_AMOUNT").expect("JITO_TIP_AMOUNT not set in environment");
+    println!("WTF41!!!");
+    // Parse the Jito tip amount as a u64 (assuming it's stored in lamports)
+    let jito_tip_amount: u64 = jito_tip_amount_str.parse().expect("Failed to parse JITO_TIP_AMOUNT");
+    println!("WTF42!!!");
+    // Create Keypair for the payer and signers (from private key)
+    let payer = keypair_from_base58(&private_key_base58); // This keypair will pay for the transaction fees
+    let signer = keypair_from_base58(&private_key_base58); // Example signer, replace with actual signer
+    println!("WTF44!!!");
+    //std::thread::sleep(std::time::Duration::new(1, 0));
+
+    // Extract the user's public key from the Keypair
+    let user_pubkey = payer.pubkey();
+    let mut instructions = Vec::new();
+    println!("WTF4!!!");
+    // Fetch the environment variables as strings
+    let compute_price_str = env::var("COMPUTE_PRICE").expect("COMPUTE_PRICE not set in environment");
+    let compute_limit_str = env::var("COMPUTE_LIMIT").expect("COMPUTE_LIMIT not set in environment");
+
+    // Convert to u32 and u64
+    let compute_price: u64 = compute_price_str
+        .parse()
+        .expect("COMPUTE_PRICE must be a valid u32");
+    let compute_limit: u32 = compute_limit_str
+        .parse()
+        .expect("COMPUTE_LIMIT must be a valid u64");
+
+    let compute_price_instruction = make_set_compute_unit_price_instruction(compute_price).await.unwrap();
+    let compute_limit_instruction = make_set_compute_unit_limit_instruction(compute_limit).await.unwrap();
+
+    println!("WTF5!!!");
+    instructions.push(compute_price_instruction);
+    instructions.push(compute_limit_instruction);
+
+    if include_create {
+        let token_program_id = pubkey_from_base58(TOKEN_PROGRAM_ID).unwrap();
+
+        let create_instruction = create_associated_token_account(
+            &user_pubkey,   // The payer for the transaction
+            &user_pubkey,  // The owner of the ATA
+            &pubkey_from_base58(mint).unwrap(),    // The mint address of the token
+            &token_program_id
+        );
+
+        instructions.push(create_instruction);
+    }
+
+
+    println!("WTF7!!!");
+    // Create the buy instruction
+    let buy_instruction = make_buy_instruction(
+        amount, 
+        max_sol_cost, 
+        mint, 
+        &user_pubkey.to_string()
+    ).await.unwrap();
+    instructions.push(buy_instruction);
+    println!("WTF!2!!");
+    // Add the Jito tip instruction
+    let tip_instruction = create_jito_tip_instruction(user_pubkey, jito_tip_amount).await.unwrap(); // Tip amount (in lamports)
+    println!("WTF!42!!");
+    instructions.push(tip_instruction);
+
+    println!("!!!!!!!!!! {:?} {}", recent_blockhash2, mint);
+    println!("!!!!!!!!!! {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
+
+    // Create the transaction with the payer and instructions
+    let transaction = make_transaction_from_instructions(
+        instructions,
+        &payer,                     // The payer of the transaction fees
+        vec![&payer, &signer],      // List of signers
+        recent_blockhash2.clone()            // Recent blockhash
+    ).await.unwrap();
+
+    // Serialize the transaction into raw bytes
+    let serialized_tx = serialize_transaction(&transaction).unwrap();
+
+    // Convert the raw bytes to Base64 (if you want to print or send via API)
+    let base58_tx = bs58::encode(&serialized_tx).into_string();
+
+    let res = send_transaction_to_helius(&base58_tx).await.unwrap();
+    
+    println!("{:?}",res);
+    // Ok(())
+
+}
+
 pub fn decode(payload: &[u8], address_table_cache: &mut AddressTableCache) -> Result<DecodedTransaction, Box<dyn Error>> {
 
     let mut transaction = DecodedTransaction::new_empty();
